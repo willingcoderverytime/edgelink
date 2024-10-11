@@ -1,21 +1,20 @@
-use std::any::Any;
 use std::fmt;
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
+use runtime::engine::Engine;
+use runtime::group::{Group, WeakGroup};
+use smallvec::SmallVec;
 use tokio::select;
-use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use super::context::Context;
-use super::group::Group;
-use super::model::{ElementId, Envelope, Msg, MsgReceiverHolder};
-use crate::runtime::engine::FlowEngine;
 use crate::runtime::env::*;
 use crate::runtime::flow::*;
 use crate::runtime::model::json::{RedFlowNodeConfig, RedGlobalNodeConfig};
 use crate::runtime::model::*;
 use crate::EdgelinkError;
+use crate::*;
 
 pub(crate) mod common_nodes;
 mod function_nodes;
@@ -49,7 +48,7 @@ impl fmt::Display for NodeKind {
     }
 }
 
-type GlobalNodeFactoryFn = fn(Arc<FlowEngine>, &RedGlobalNodeConfig) -> crate::Result<Box<dyn GlobalNodeBehavior>>;
+type GlobalNodeFactoryFn = fn(&Engine, &RedGlobalNodeConfig) -> crate::Result<Box<dyn GlobalNodeBehavior>>;
 
 type FlowNodeFactoryFn = fn(&Flow, FlowNode, &RedFlowNodeConfig) -> crate::Result<Box<dyn FlowNodeBehavior>>;
 
@@ -74,12 +73,13 @@ pub struct FlowNode {
     pub type_str: &'static str,
     pub ordering: usize,
     pub disabled: bool,
-    pub flow: Weak<Flow>,
+    pub active: bool,
+    pub flow: WeakFlow,
     pub msg_tx: MsgSender,
     pub msg_rx: MsgReceiverHolder,
     pub ports: Vec<Port>,
-    pub group: Option<Weak<Group>>,
-    pub envs: Arc<EnvStore>,
+    pub group: Option<WeakGroup>,
+    pub envs: Envs,
     pub context: Arc<Context>,
 
     pub on_received: MsgEventSender,
@@ -87,63 +87,55 @@ pub struct FlowNode {
     pub on_error: MsgEventSender,
 }
 
-impl FlowNode {}
-
-#[async_trait]
-pub trait GlobalNodeBehavior: 'static + Send + Sync {
-    fn id(&self) -> &ElementId;
-    fn name(&self) -> &str;
-    fn type_name(&self) -> &'static str;
-
-    /// Cast the global node to the any type
-    fn as_any(&self) -> &dyn Any;
+#[derive(Debug)]
+pub struct GlobalNode {
+    pub id: ElementId,
+    pub name: String,
+    pub type_str: &'static str,
+    pub ordering: usize,
+    pub context: Arc<Context>,
+    pub disabled: bool,
 }
 
 #[async_trait]
-pub trait FlowNodeBehavior: 'static + Send + Sync + FlowsElement {
+pub trait GlobalNodeBehavior: Send + Sync + FlowsElement {
+    fn get_node(&self) -> &GlobalNode;
+}
+
+#[async_trait]
+pub trait FlowNodeBehavior: Send + Sync + FlowsElement {
     fn get_node(&self) -> &FlowNode;
 
     async fn run(self: Arc<Self>, stop_token: CancellationToken);
 
-    fn group(&self) -> &Option<Weak<Group>> {
-        &self.get_node().group
+    fn group(&self) -> Option<Group> {
+        self.get_node().group.clone().and_then(|x| x.upgrade())
     }
 
-    fn get_flow(&self) -> &Weak<Flow> {
-        &self.get_node().flow
+    fn flow(&self) -> Option<Flow> {
+        self.get_node().flow.upgrade()
     }
 
-    fn get_envs(&self) -> Arc<EnvStore> {
-        self.get_node().envs.clone()
+    fn envs(&self) -> &Envs {
+        &self.get_node().envs
     }
 
     fn get_env(&self, key: &str) -> Option<Variant> {
         self.get_node().envs.evalute_env(key)
     }
 
-    fn get_context(&self) -> Arc<Context> {
-        self.get_node().context.clone()
+    fn engine(&self) -> Option<Engine> {
+        self.get_node().flow.upgrade()?.engine()
     }
 
-    fn get_engine(&self) -> Option<Arc<FlowEngine>> {
-        let flow = self.get_node().flow.upgrade()?;
-        flow.engine.upgrade()
-    }
-
-    async fn inject_msg(&self, msg: Arc<RwLock<Msg>>, cancel: CancellationToken) -> crate::Result<()> {
+    async fn inject_msg(&self, msg: MsgHandle, cancel: CancellationToken) -> crate::Result<()> {
         select! {
-            result = self.get_node().msg_tx.send(msg) => {
-                result.map_err(|e| e.into())
-            }
-
-            _ = cancel.cancelled() => {
-                // The token was cancelled
-                Err(EdgelinkError::TaskCancelled.into())
-            }
+            result = self.get_node().msg_tx.send(msg) => result.map_err(|e| e.into()),
+            _ = cancel.cancelled() => Err(EdgelinkError::TaskCancelled.into()),
         }
     }
 
-    async fn recv_msg(&self, stop_token: CancellationToken) -> crate::Result<Arc<RwLock<Msg>>> {
+    async fn recv_msg(&self, stop_token: CancellationToken) -> crate::Result<MsgHandle> {
         let msg = self.get_node().msg_rx.recv_msg(stop_token).await?;
         if self.get_node().on_received.receiver_count() > 0 {
             self.get_node().on_received.send(msg.clone())?;
@@ -151,7 +143,7 @@ pub trait FlowNodeBehavior: 'static + Send + Sync + FlowsElement {
         Ok(msg)
     }
 
-    async fn notify_uow_completed(&self, msg: &Msg, cancel: CancellationToken) {
+    async fn notify_uow_completed(&self, msg: MsgHandle, cancel: CancellationToken) {
         let (node_id, flow) = { (self.id(), self.get_node().flow.upgrade()) };
         if let Some(flow) = flow {
             flow.notify_node_uow_completed(&node_id, msg, cancel).await;
@@ -160,26 +152,21 @@ pub trait FlowNodeBehavior: 'static + Send + Sync + FlowsElement {
         }
     }
 
-    async fn fan_out_one(&self, envelope: &Envelope, cancel: CancellationToken) -> crate::Result<()> {
+    async fn fan_out_one(&self, envelope: Envelope, cancel: CancellationToken) -> crate::Result<()> {
         if self.get_node().ports.is_empty() {
             log::warn!("No output wires in this node: Node(id='{}', name='{}')", self.id(), self.name());
             return Ok(());
         }
         if envelope.port >= self.get_node().ports.len() {
-            return Err(crate::EdgelinkError::BadArguments(format!("Invalid port index {}", envelope.port)).into());
+            return Err(crate::EdgelinkError::BadArgument("envelope"))
+                .with_context(|| format!("Invalid port index {}", envelope.port));
         }
 
         let port = &self.get_node().ports[envelope.port];
 
         let mut msg_sent = false;
         for wire in port.wires.iter() {
-            let msg_to_send = if msg_sent {
-                // other msg
-                let to_clone = envelope.msg.read().await;
-                Arc::new(RwLock::new(to_clone.clone()))
-            } else {
-                envelope.msg.clone() // First time
-            };
+            let msg_to_send = if msg_sent { envelope.msg.deep_clone(true).await } else { envelope.msg.clone() };
 
             wire.tx(msg_to_send, cancel.clone()).await?;
             msg_sent = true;
@@ -187,16 +174,28 @@ pub trait FlowNodeBehavior: 'static + Send + Sync + FlowsElement {
         Ok(())
     }
 
-    async fn fan_out_many(&self, envelopes: &[Envelope], cancel: CancellationToken) -> crate::Result<()> {
+    async fn fan_out_many(&self, envelopes: SmallVec<[Envelope; 4]>, cancel: CancellationToken) -> crate::Result<()> {
         if self.get_node().ports.is_empty() {
             log::warn!("No output wires in this node: Node(id='{}')", self.id());
             return Ok(());
         }
 
-        for e in envelopes.iter() {
+        for e in envelopes.into_iter() {
             self.fan_out_one(e, cancel.child_token()).await?;
         }
         Ok(())
+    }
+
+    async fn report_error(&self, log_message: String, msg: MsgHandle, cancel: CancellationToken) {
+        let handled = if let Some(flow) = self.flow() {
+            let node = self.as_any().downcast_ref::<Arc<dyn FlowNodeBehavior>>().unwrap(); // FIXME
+            flow.handle_error(node.as_ref(), &log_message, Some(msg), None, cancel).await.unwrap_or(false)
+        } else {
+            false
+        };
+        if !handled {
+            log::error!("[{}:{}] {}", self.type_str(), self.name(), log_message);
+        }
     }
 
     // events
@@ -212,15 +211,23 @@ impl dyn GlobalNodeBehavior {
 
 impl fmt::Debug for dyn GlobalNodeBehavior {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_fmt(
-            format_args!("GlobalNode(id='{}', type='{}', name='{}')", self.id(), self.type_name(), self.name(),),
-        )
+        f.write_fmt(format_args!(
+            "GlobalNode(id='{}', type='{}', name='{}')",
+            self.id(),
+            self.get_node().type_str,
+            self.name(),
+        ))
     }
 }
 
 impl fmt::Display for dyn GlobalNodeBehavior {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!("FlowNode(id='{}', type='{}', name='{}')", self.id(), self.type_name(), self.name(),))
+        f.write_fmt(format_args!(
+            "GlobalNode(id='{}', type='{}', name='{}')",
+            self.id(),
+            self.get_node().type_str,
+            self.name(),
+        ))
     }
 }
 
@@ -245,32 +252,32 @@ impl fmt::Display for dyn FlowNodeBehavior {
 pub async fn with_uow<'a, B, F, T>(node: &'a B, cancel: CancellationToken, proc: F)
 where
     B: FlowNodeBehavior,
-    F: FnOnce(&'a B, Arc<RwLock<Msg>>) -> T,
+    F: FnOnce(&'a B, MsgHandle) -> T,
     T: std::future::Future<Output = crate::Result<()>>,
 {
-    match node.recv_msg(cancel.child_token()).await {
+    match node.recv_msg(cancel.clone()).await {
         Ok(msg) => {
             if let Err(ref err) = proc(node, msg.clone()).await {
-                // TODO report error
-                log::warn!("Failed to commit uow job: {}", err.to_string())
+                let flow = node.flow().expect("flow");
+                let error_message = err.to_string();
+
+                match flow.handle_error(node, &error_message, Some(msg.clone()), None, cancel.clone()).await {
+                    Ok(_) => (),
+                    Err(e) => {
+                        log::error!("Failed to handle error: {:?}", e);
+                    }
+                }
             }
+
             // Report the completion
-            {
-                let msg_guard = msg.read().await;
-                node.notify_uow_completed(&msg_guard, cancel.child_token()).await;
-            }
+            node.notify_uow_completed(msg, cancel.clone()).await;
         }
         Err(ref err) => {
             if let Some(EdgelinkError::TaskCancelled) = err.downcast_ref::<EdgelinkError>() {
                 return;
             }
-            log::warn!(
-                "with_uow() Error: Node(id='{}', name='{}', type='{}')\n{:#?}",
-                node.id(),
-                node.name(),
-                node.type_str(),
-                err
-            );
+
+            log::warn!("[{}:{}] {}", node.type_str(), node.name(), err);
         }
     }
 }
@@ -280,7 +287,7 @@ pub trait LinkCallNodeBehavior: Send + Sync + FlowNodeBehavior {
     /// Receive the returning message
     async fn return_msg(
         &self,
-        msg: Arc<RwLock<Msg>>,
+        msg: MsgHandle,
         stack_id: ElementId,
         return_from_node_id: ElementId,
         return_from_flow_id: ElementId,

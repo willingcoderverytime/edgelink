@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use tokio;
@@ -34,8 +34,13 @@ pub trait FlowsElement: Sync + Send {
     fn name(&self) -> &str;
     fn type_str(&self) -> &'static str;
     fn ordering(&self) -> usize;
+    fn is_disabled(&self) -> bool;
     fn as_any(&self) -> &dyn ::std::any::Any;
-    fn parent_element(&self) -> Option<Arc<dyn FlowsElement>>;
+    fn parent_element(&self) -> Option<ElementId>;
+    fn get_path(&self) -> String;
+}
+
+pub trait ContextHolder: FlowsElement + Sync + Send {
     fn context(&self) -> Arc<Context>;
 }
 
@@ -43,11 +48,11 @@ pub trait FlowsElement: Sync + Send {
 pub struct PortWire {
     // pub target_node_id: ElementId,
     // pub target_node: Weak<dyn FlowNodeBehavior>,
-    pub msg_sender: tokio::sync::mpsc::Sender<Arc<RwLock<Msg>>>,
+    pub msg_sender: tokio::sync::mpsc::Sender<MsgHandle>,
 }
 
 impl PortWire {
-    pub async fn tx(&self, msg: Arc<RwLock<Msg>>, cancel: CancellationToken) -> crate::Result<()> {
+    pub async fn tx(&self, msg: MsgHandle, cancel: CancellationToken) -> crate::Result<()> {
         tokio::select! {
 
             send_result = self.msg_sender.send(msg) =>  send_result.map_err(|e|
@@ -70,8 +75,8 @@ impl Port {
     }
 }
 
-pub type MsgSender = mpsc::Sender<Arc<RwLock<Msg>>>;
-pub type MsgReceiver = mpsc::Receiver<Arc<RwLock<Msg>>>;
+pub type MsgSender = mpsc::Sender<MsgHandle>;
+pub type MsgReceiver = mpsc::Receiver<MsgHandle>;
 
 #[derive(Debug)]
 pub struct MsgReceiverHolder {
@@ -83,18 +88,56 @@ impl MsgReceiverHolder {
         MsgReceiverHolder { rx: Mutex::new(rx) }
     }
 
-    pub async fn recv_msg_forever(&self) -> crate::Result<Arc<RwLock<Msg>>> {
+    pub async fn recv_msg_forever(&self) -> crate::Result<MsgHandle> {
         let rx = &mut self.rx.lock().await;
         match rx.recv().await {
             Some(msg) => Ok(msg),
             None => {
                 log::error!("Failed to receive message");
-                Err(EdgelinkError::TaskCancelled.into())
+                Err(EdgelinkError::InvalidOperation("No message in the bounded channel!".to_string()).into())
             }
         }
     }
 
-    pub async fn recv_msg(&self, stop_token: CancellationToken) -> crate::Result<Arc<RwLock<Msg>>> {
+    pub async fn recv_msg(&self, stop_token: CancellationToken) -> crate::Result<MsgHandle> {
+        tokio::select! {
+            result = self.recv_msg_forever() => {
+                result
+            }
+
+            _ = stop_token.cancelled() => {
+                // The token was cancelled
+                Err(EdgelinkError::TaskCancelled.into())
+            }
+        }
+    }
+}
+
+pub type MsgUnboundedSender = mpsc::UnboundedSender<MsgHandle>;
+pub type MsgUnboundedReceiver = mpsc::UnboundedReceiver<MsgHandle>;
+
+#[derive(Debug)]
+pub struct MsgUnboundedReceiverHolder {
+    pub rx: Mutex<MsgUnboundedReceiver>,
+}
+
+impl MsgUnboundedReceiverHolder {
+    pub fn new(rx: MsgUnboundedReceiver) -> Self {
+        MsgUnboundedReceiverHolder { rx: Mutex::new(rx) }
+    }
+
+    pub async fn recv_msg_forever(&self) -> crate::Result<MsgHandle> {
+        let rx = &mut self.rx.lock().await;
+        match rx.recv().await {
+            Some(msg) => Ok(msg),
+            None => {
+                log::error!("Failed to receive message");
+                Err(EdgelinkError::InvalidOperation("No message in the unbounded channel!".to_string()).into())
+            }
+        }
+    }
+
+    pub async fn recv_msg(&self, stop_token: CancellationToken) -> crate::Result<MsgHandle> {
         tokio::select! {
             result = self.recv_msg_forever() => {
                 result
@@ -126,5 +169,5 @@ pub fn query_trait<T: RuntimeElement, U: 'static>(ele: &T) -> Option<&U> {
     ele.as_any().downcast_ref::<U>()
 }
 
-pub type MsgEventSender = tokio::sync::broadcast::Sender<Arc<RwLock<Msg>>>;
-pub type MsgEventReceiver = tokio::sync::broadcast::Receiver<Arc<RwLock<Msg>>>;
+pub type MsgEventSender = tokio::sync::broadcast::Sender<MsgHandle>;
+pub type MsgEventReceiver = tokio::sync::broadcast::Receiver<MsgHandle>;

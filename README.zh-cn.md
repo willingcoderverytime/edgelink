@@ -48,13 +48,14 @@ cargo build -r
 >
 > 你还需要安装 `rquickjs` 这个 crate 需要的 Microsoft Visual C++ 和 Windows SDK，推荐直接装 Visual Studio。
 
-测试过的工具链：
+测试过的工具链（见 GitHub Actions）：
 
 * `x86_64-pc-windows-msvc`
 * `x86_64-pc-windows-gnu`
 * `x86_64-unknown-linux-gnu`
 * `aarch64-unknown-linux-gnu`
 * `armv7-unknown-linux-gnueabihf`
+* `armv7-unknown-linux-gnueabi`
 
 ### 2. 运行
 
@@ -81,14 +82,15 @@ cargo test --all
 运行集成测试需要首先安装 Python 3.9+ 和对应的 Pytest 依赖库：
 
 ```bash
-pip install -U -r ./tests/requirements.txt
+pip install -r ./tests/requirements.txt
 ```
 
 然后执行以下命令即可：
 
 ```bash
-cargo build -r
-python -B -m pytest tests
+set PYO3_PYTHON=你的Python.exe路径 # 仅有 Windows 需要设置此环境变量
+cargo build --all
+py.test
 ```
 
 
@@ -99,6 +101,12 @@ python -B -m pytest tests
 ## 项目状态
 
 **Pre-Alpha**：项目当前处于发布前活跃开发阶段，不保证任何稳定性。
+
+参考 [REDNODES-SPECS-DIFF.md](tests/REDNODES-SPECS-DIFF.md) 查看目前项目已实现节点和 Node-RED 的规格测试对比。
+
+## 开发路线图
+
+请参见项目的[里程碑页面](https://github.com/oldrev/edgelink/milestones)。
 
 ## 贡献
 
@@ -112,7 +120,7 @@ python -B -m pytest tests
 
 ## 反馈与技术支持
 
-我们欢迎任何反馈！如果你遇到任何技术问题或者 bug，请提交 [issue](https://github.com/edge-link/edgelink.rs/issues)。
+我们欢迎任何反馈！如果你遇到任何技术问题或者 bug，请提交 [issue](https://github.com/edge-link/edgelink/issues)。
 
 ### 社交网络聊天群：
 

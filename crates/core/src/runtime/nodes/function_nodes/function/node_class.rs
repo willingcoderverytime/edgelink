@@ -1,12 +1,11 @@
 use std::sync::{Arc, Weak};
 
 use rquickjs::{class::Trace, prelude::Opt, Ctx, FromJs, IntoJs, Value};
-use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::runtime::js::util;
 
-use super::{EdgelinkError, Envelope, FlowNodeBehavior, FunctionNode, Msg};
+use super::*;
 
 #[derive(Clone, Trace)]
 #[rquickjs::class(frozen)]
@@ -40,7 +39,18 @@ impl NodeClass {
     #[qjs(get, rename = "outputCount")]
     fn get_output_count(&self) -> rquickjs::Result<usize> {
         let node = self.node.upgrade().clone().ok_or(rquickjs::Error::UnrelatedRuntime)?;
-        Ok(node.config.output_count)
+        Ok(node.output_count)
+    }
+
+    #[qjs(rename = "status")]
+    fn status<'js>(self, _status_obj: Value<'js>, _ctx: Ctx<'js>) -> rquickjs::Result<()> {
+        // do nothing...
+        Ok(())
+    }
+
+    #[qjs(rename = "done")]
+    fn done(self) {
+        // do nothing...
     }
 
     #[qjs(rename = "send")]
@@ -60,7 +70,7 @@ impl NodeClass {
 
         match msgs.type_of() {
             rquickjs::Type::Array => {
-                let mut msgs_to_send = Vec::new();
+                let mut msgs_to_send = SmallVec::new();
                 let ports = msgs.as_array().expect("Must be an array");
                 // The first-level array is bound to a port.
                 let mut is_first = true;
@@ -74,8 +84,7 @@ impl NodeClass {
                                 let msg_value =
                                     if cloning && is_first { util::deep_clone(ctx.clone(), msg)? } else { msg };
                                 is_first = false;
-                                let envelope =
-                                    Envelope { port, msg: Arc::new(RwLock::new(Msg::from_js(&ctx, msg_value)?)) };
+                                let envelope = Envelope { port, msg: MsgHandle::new(Msg::from_js(&ctx, msg_value)?) };
                                 msgs_to_send.push(envelope);
                             }
                         }
@@ -87,7 +96,7 @@ impl NodeClass {
                             msgs_in_port
                         };
                         is_first = false;
-                        let envelope = Envelope { port, msg: Arc::new(RwLock::new(Msg::from_js(&ctx, msg_value)?)) };
+                        let envelope = Envelope { port, msg: MsgHandle::new(Msg::from_js(&ctx, msg_value)?) };
                         msgs_to_send.push(envelope);
                     } else {
                         log::warn!("Unknown msg type: {}", port);
@@ -97,7 +106,7 @@ impl NodeClass {
                 let cancel = CancellationToken::new();
                 let async_node = node.clone();
                 ctx.spawn(async move {
-                    match async_node.fan_out_many(&msgs_to_send, cancel).await {
+                    match async_node.fan_out_many(msgs_to_send, cancel).await {
                         Ok(_) => {}
                         Err(err) => log::error!("Failed to send msg in function node: {}", err),
                     }
@@ -105,13 +114,13 @@ impl NodeClass {
             }
 
             rquickjs::Type::Object => {
-                let msg_to_send = Arc::new(RwLock::new(Msg::from_js(&ctx, msgs)?));
+                let msg_to_send = MsgHandle::new(Msg::from_js(&ctx, msgs)?);
                 let envelope = Envelope { port: 0, msg: msg_to_send };
                 // FIXME
                 let cancel = CancellationToken::new();
                 let async_node = node.clone();
                 ctx.spawn(async move {
-                    match async_node.fan_out_one(&envelope, cancel).await {
+                    match async_node.fan_out_one(envelope, cancel).await {
                         Ok(_) => {}
                         Err(err) => log::error!("Failed to send msg in function node: {}", err),
                     }
@@ -124,4 +133,72 @@ impl NodeClass {
         }
         Ok(())
     }
+
+    fn log<'js>(&self, text: Value<'js>, ctx: Ctx<'js>) -> rquickjs::Result<()> {
+        let node = self.node.upgrade().ok_or(rquickjs::Error::Exception)?;
+        let name = &node.get_node().name;
+        if text.type_of() == rquickjs::Type::String {
+            log::info!("[function:{}] {}", name, text.get::<String>()?);
+        } else {
+            log::info!("[function:{}] {:?}", name, ctx.json_stringify(text)?);
+        }
+        Ok(())
+    }
+
+    fn warn<'js>(&self, text: Value<'js>, ctx: Ctx<'js>) -> rquickjs::Result<()> {
+        let node = self.node.upgrade().ok_or(rquickjs::Error::Exception)?;
+        let name = &node.get_node().name;
+        if text.type_of() == rquickjs::Type::String {
+            log::warn!("[function:{}] {}", name, text.get::<String>()?);
+        } else {
+            log::warn!("[function:{}] {:?}", name, ctx.json_stringify(text)?);
+        }
+        Ok(())
+    }
+
+    fn error<'js>(&self, text: Value<'js>, _msg: Opt<rquickjs::Value<'js>>, ctx: Ctx<'js>) -> rquickjs::Result<()> {
+        // TODO
+        let node = self.node.upgrade().ok_or(rquickjs::Error::Exception)?;
+        let name = &node.get_node().name;
+        if text.type_of() == rquickjs::Type::String {
+            log::error!("[function:{}] {}", name, text.get::<String>()?);
+        } else {
+            log::error!("[function:{}] {:?}", name, ctx.json_stringify(text)?);
+        }
+        Ok(())
+    }
+
+    fn debug<'js>(&self, text: Value<'js>, ctx: Ctx<'js>) -> rquickjs::Result<()> {
+        let node = self.node.upgrade().ok_or(rquickjs::Error::Exception)?;
+        let name = &node.get_node().name;
+        if text.type_of() == rquickjs::Type::String {
+            log::debug!("[function:{}] {}", name, text.get::<String>()?);
+        } else {
+            log::debug!("[function:{}] {:?}", name, ctx.json_stringify(text)?);
+        }
+        Ok(())
+    }
+
+    fn trace<'js>(&self, text: Value<'js>, ctx: Ctx<'js>) -> rquickjs::Result<()> {
+        let node = self.node.upgrade().ok_or(rquickjs::Error::Exception)?;
+        let name = &node.get_node().name;
+        if text.type_of() == rquickjs::Type::String {
+            log::trace!("[function:{}] {}", name, text.get::<String>()?);
+        } else {
+            log::trace!("[function:{}] {:?}", name, ctx.json_stringify(text)?);
+        }
+        Ok(())
+    }
 }
+
+/*
+pub fn init(ctx: &Ctx<'_>, node: &Arc<FunctionNode>) -> crate::Result<()> {
+    let globals = ctx.globals();
+
+    rquickjs::Class::<NodeClass>::register(ctx)?;
+
+    globals.set("node", NodeClass::new(node))?;
+
+    Ok(())
+}
+*/

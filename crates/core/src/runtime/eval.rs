@@ -1,8 +1,8 @@
 use std::borrow::Cow;
-use std::sync::Arc;
 
 use regex::Regex;
 use serde::Deserialize;
+use smallvec::SmallVec;
 
 use crate::runtime::flow::*;
 use crate::runtime::model::*;
@@ -11,7 +11,7 @@ use crate::utils;
 use crate::*;
 
 /// Get value of environment variable.
-fn evaluate_env_property(name: &str, node: Option<&dyn FlowNodeBehavior>, flow: Option<&Arc<Flow>>) -> Option<Variant> {
+fn evaluate_env_property(name: &str, node: Option<&dyn FlowNodeBehavior>, flow: Option<&Flow>) -> Option<Variant> {
     if let Some(node) = node {
         if let Some(var) = node.get_env(name) {
             return Some(var);
@@ -20,7 +20,7 @@ fn evaluate_env_property(name: &str, node: Option<&dyn FlowNodeBehavior>, flow: 
 
     if let Some(flow_ref) = flow {
         if let Some(node) = node {
-            if let Some(ref group) = node.group().clone().and_then(|g| g.upgrade()) {
+            if let Some(ref group) = node.group() {
                 return group.get_env(name);
             }
         }
@@ -28,9 +28,7 @@ fn evaluate_env_property(name: &str, node: Option<&dyn FlowNodeBehavior>, flow: 
         return flow_ref.get_env(name);
     }
 
-    // TODO FIXME
-    // We should use the snapshot in the FlowEngine
-    Some(std::env::var(name).map(Variant::String).unwrap_or(Variant::Null))
+    flow.and_then(|f| f.engine()).or(node.and_then(|n| n.engine())).and_then(|x| x.get_env(name))
 }
 
 /// Evaluates a property value according to its type.
@@ -45,7 +43,7 @@ pub async fn evaluate_node_property(
     value: &str,
     _type: RedPropertyType,
     node: Option<&dyn FlowNodeBehavior>,
-    flow: Option<&Arc<Flow>>,
+    flow: Option<&Flow>,
     msg: Option<&Msg>,
 ) -> crate::Result<Variant> {
     match _type {
@@ -69,7 +67,8 @@ pub async fn evaluate_node_property(
             let arr = Variant::deserialize(&jv)?;
             let bytes = arr
                 .to_bytes()
-                .ok_or(EdgelinkError::InvalidData(format!("Expected an array of bytes, got: {:?}", value)))?;
+                .ok_or(EdgelinkError::BadArgument("value"))
+                .with_context(|| format!("Expected an array of bytes, got: {:?}", value))?;
             Ok(Variant::from(bytes))
         }
 
@@ -78,41 +77,45 @@ pub async fn evaluate_node_property(
                 if let Some(pv) = msg.get_nav_stripped(value) {
                     Ok(pv.clone())
                 } else {
-                    Err(EdgelinkError::BadArguments(format!("Cannot get the property(s) from `msg`: {}", value)).into())
+                    Err(EdgelinkError::BadArgument("value"))
+                        .with_context(|| format!("Cannot get the property(s) from `msg`: {}", value))
                 }
             } else {
-                Err(EdgelinkError::BadArguments("`msg` is not existed!".to_string()).into())
+                Err(EdgelinkError::BadArgument("msg")).with_context(|| ("`msg` is not existed!".to_string()))
             }
         }
 
         RedPropertyType::Global => {
-            /*
-            let csp = context::parse_context_store(value)?;
-            // TODO normalize propex
-            let engine = node.and_then(|n| n.get_engine()).or(flow.and_then(|f| f.engine.upgrade())).unwrap();
-            if let Some(ctx_value) = engine.get_context().get_one(csp.store, csp.key).await {
+            let ctx_prop = crate::runtime::context::evaluate_key(value)?;
+            let ctx = flow
+                .and_then(|f| f.engine())
+                .or(node.and_then(|n| n.engine()))
+                .map(|e| e.context().clone())
+                .ok_or_else(|| EdgelinkError::BadArgument("flow,node"))?;
+
+            let msg_env = msg.map(|m| SmallVec::from([PropexEnv::ExtRef("msg", m.as_variant())])).unwrap_or_default();
+            if let Some(ctx_value) = ctx.get_one(ctx_prop.store, ctx_prop.key, &msg_env).await {
                 Ok(ctx_value)
             } else {
-                Err(EdgelinkError::OutOfRange.into())
-            }
-            */
-            let engine = node.and_then(|n| n.get_engine()).or(flow.and_then(|f| f.engine.upgrade())).unwrap();
-            let ctx_prop = crate::runtime::context::parse_store(value)?;
-            if let Some(ctx_value) = engine.get_context().get_one(&ctx_prop).await {
-                Ok(ctx_value)
-            } else {
-                Err(EdgelinkError::OutOfRange.into())
+                Err(EdgelinkError::BadArgument("value"))
+                    .with_context(|| format!("Cannot found the global context variable `{}`", value))
             }
         }
 
         RedPropertyType::Flow => {
-            let flow = node.and_then(|n| n.get_flow().upgrade()).unwrap();
-            let fe = flow as Arc<dyn FlowsElement>;
-            let ctx_prop = crate::runtime::context::parse_store(value)?;
-            if let Some(ctx_value) = fe.context().get_one(&ctx_prop).await {
+            let ctx_prop = crate::runtime::context::evaluate_key(value)?;
+            let ctx = flow
+                .cloned()
+                .or(node.and_then(|n| n.flow()))
+                .map(|e| e.context().clone())
+                .ok_or_else(|| EdgelinkError::BadArgument("flow,node"))?;
+
+            let msg_env = msg.map(|m| SmallVec::from([PropexEnv::ExtRef("msg", m.as_variant())])).unwrap_or_default();
+            if let Some(ctx_value) = ctx.get_one(ctx_prop.store, ctx_prop.key, &msg_env).await {
                 Ok(ctx_value)
             } else {
-                Err(EdgelinkError::OutOfRange.into())
+                Err(EdgelinkError::BadArgument("value"))
+                    .with_context(|| format!("Cannot found the flow context variable `{}`", value))
             }
         }
 
@@ -122,7 +125,8 @@ pub async fn evaluate_node_property(
 
         RedPropertyType::Env => match evaluate_env_property(value, node, flow) {
             Some(ev) => Ok(ev),
-            _ => Err(EdgelinkError::InvalidData(format!("Cannot found the environment variable: '{}'", value)).into()),
+            _ => Err(EdgelinkError::BadArgument("value"))
+                .with_context(|| format!("Cannot found the environment variable `{}`", value)),
         },
     }
 }
@@ -132,7 +136,7 @@ pub fn evaluate_node_property_variant<'a>(
     value: &'a Variant,
     type_: &'a RedPropertyType,
     node: Option<&'a dyn FlowNodeBehavior>,
-    flow: Option<&'a Arc<Flow>>,
+    flow: Option<&'a Flow>,
     msg: Option<&'a Msg>,
 ) -> crate::Result<Cow<'a, Variant>> {
     let res = match (type_, value) {
@@ -164,7 +168,8 @@ pub fn evaluate_node_property_variant<'a>(
             let arr = Variant::deserialize(&jv)?;
             let bytes = arr
                 .to_bytes()
-                .ok_or(EdgelinkError::InvalidData(format!("Expected an array of bytes, got: {:?}", value)))?;
+                .ok_or(EdgelinkError::BadArgument("value"))
+                .with_context(|| format!("Expected an array of bytes, got: {:?}", value))?;
             Cow::Owned(Variant::from(bytes))
         }
 
@@ -173,14 +178,11 @@ pub fn evaluate_node_property_variant<'a>(
                 if let Some(pv) = msg.get_nav_stripped(prop.as_str()) {
                     Cow::Owned(pv.clone())
                 } else {
-                    return Err(EdgelinkError::BadArguments(format!(
-                        "Cannot get the property(s) from `msg`: {}",
-                        prop.as_str()
-                    ))
-                    .into());
+                    return Err(EdgelinkError::BadArgument("value"))
+                        .with_context(|| format!("Cannot get the property(s) from `msg`: {}", prop.as_str()));
                 }
             } else {
-                return Err(EdgelinkError::BadArguments("`msg` is not existed!".to_string()).into());
+                return Err(EdgelinkError::BadArgument("msg")).with_context(|| "`msg` is required".to_string());
             }
         }
 
@@ -194,14 +196,13 @@ pub fn evaluate_node_property_variant<'a>(
         (RedPropertyType::Env, Variant::String(s)) => match evaluate_env_property(s, node, flow) {
             Some(ev) => Cow::Owned(ev),
             _ => {
-                return Err(
-                    EdgelinkError::InvalidData(format!("Cannot found the environment variable: '{}'", s)).into()
-                );
+                return Err(EdgelinkError::BadArgument("value"))
+                    .with_context(|| format!("Cannot found the environment variable: '{}'", s));
             }
         },
 
         (_, _) => {
-            return Err(EdgelinkError::BadArguments(format!("Unable to evaluate property value: {:?}", value)).into());
+            return Err(EdgelinkError::BadArgument("value")).with_context(|| "cannot parse the expr".to_string());
         }
     };
 

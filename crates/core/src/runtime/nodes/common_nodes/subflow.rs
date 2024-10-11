@@ -15,14 +15,11 @@ struct SubflowNode {
 impl SubflowNode {
     fn build(_flow: &Flow, state: FlowNode, config: &RedFlowNodeConfig) -> crate::Result<Box<dyn FlowNodeBehavior>> {
         let subflow_id = config
-            .json
-            .get("type")
-            .and_then(|s| s.as_str())
-            .and_then(|s| s.split_once(':'))
+            .type_name
+            .split_once(':')
             .and_then(|p| helpers::parse_red_id_str(p.1))
-            .ok_or(EdgelinkError::BadFlowsJson(
-                "Cannot get or parse the `type` property with the format `subflow:xxx`".to_string(),
-            ))?;
+            .ok_or(EdgelinkError::BadArgument("config"))
+            .with_context(|| format!("Bad subflow instance type: `{}`", config.type_name))?;
 
         //let subflow = flow.engine.upgrade().unwrap().flows
         let node = SubflowNode { base: state, subflow_id };
@@ -40,8 +37,8 @@ impl FlowNodeBehavior for SubflowNode {
         while !stop_token.is_cancelled() {
             let cancel = stop_token.clone();
             with_uow(self.as_ref(), stop_token.clone(), |node, msg| async move {
-                if let Some(engine) = node.get_node().flow.upgrade().and_then(|f| f.engine.upgrade()) {
-                    engine.inject_msg_to_flow(&node.subflow_id, msg, cancel.clone()).await?;
+                if let Some(engine) = node.get_node().flow.upgrade().and_then(|f| f.engine()) {
+                    engine.inject_msg_to_flow(node.subflow_id, msg, cancel.clone()).await?;
                 }
 
                 Ok(())

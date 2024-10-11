@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::{Index, IndexMut};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use serde::de;
@@ -20,13 +21,18 @@ pub mod wellknown {
     pub const LINK_SOURCE_PROPERTY: &str = "_linkSource";
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Envelope {
     pub port: usize,
-    pub msg: Arc<RwLock<Msg>>,
+    pub msg: MsgHandle,
 }
 
 pub type MsgBody = BTreeMap<String, Variant>;
+
+#[derive(Debug, Clone)]
+pub struct MsgHandle {
+    inner: Arc<RwLock<Msg>>,
+}
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct LinkCallStackEntry {
@@ -34,42 +40,31 @@ pub struct LinkCallStackEntry {
     pub link_call_node_id: ElementId,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Msg {
-    body: BTreeMap<String, Variant>,
+    body: Variant,
     pub link_call_stack: Option<Vec<LinkCallStackEntry>>,
 }
 
+impl Default for Msg {
+    fn default() -> Self {
+        Msg { body: Variant::empty_object(), link_call_stack: None }
+    }
+}
+
 impl Msg {
-    pub fn new_default() -> Arc<RwLock<Self>> {
-        let msg = Msg {
-            link_call_stack: None,
-            body: BTreeMap::from([
-                (wellknown::MSG_ID_PROPERTY.to_string(), Msg::generate_id_variant()),
-                ("payload".to_string(), Variant::Null),
-            ]),
-        };
-        Arc::new(RwLock::new(msg))
-    }
-
-    pub fn new_with_body(body: BTreeMap<String, Variant>) -> Arc<RwLock<Self>> {
-        let msg = Msg { link_call_stack: None, body };
-        Arc::new(RwLock::new(msg))
-    }
-
-    pub fn new_with_payload(payload: Variant) -> Arc<RwLock<Self>> {
-        let msg = Msg {
-            link_call_stack: None,
-            body: BTreeMap::from([
-                (wellknown::MSG_ID_PROPERTY.to_string(), Msg::generate_id_variant()),
-                ("payload".to_string(), payload),
-            ]),
-        };
-        Arc::new(RwLock::new(msg))
-    }
-
     pub fn id(&self) -> Option<ElementId> {
-        self.body.get(wellknown::MSG_ID_PROPERTY).and_then(|x| x.as_str()).and_then(parse_red_id_str)
+        self.body
+            .as_object()
+            .unwrap()
+            .get(wellknown::MSG_ID_PROPERTY)
+            .and_then(|x| x.as_str())
+            .and_then(parse_red_id_str)
+    }
+
+    pub fn set_id(&mut self, id: ElementId) {
+        let uid: u64 = id.into();
+        self.body.as_object_mut().unwrap().insert(wellknown::MSG_ID_PROPERTY.to_string(), Variant::from(uid));
     }
 
     pub fn generate_id() -> ElementId {
@@ -77,27 +72,36 @@ impl Msg {
     }
 
     pub fn generate_id_variant() -> Variant {
-        Variant::String(ElementId::new().to_string())
+        let uid: u64 = Msg::generate_id().into();
+        Variant::from(uid)
     }
 
-    pub fn as_variant_object(&self) -> &VariantObjectMap {
+    pub fn as_variant(&self) -> &Variant {
         &self.body
     }
 
-    pub fn as_variant_object_mut(&mut self) -> &mut VariantObjectMap {
+    pub fn as_variant_mut(&mut self) -> &mut Variant {
         &mut self.body
     }
 
+    pub fn as_variant_object(&self) -> &VariantObjectMap {
+        self.body.as_object().unwrap()
+    }
+
+    pub fn as_variant_object_mut(&mut self) -> &mut VariantObjectMap {
+        self.body.as_object_mut().unwrap()
+    }
+
     pub fn contains(&self, prop: &str) -> bool {
-        self.body.contains_property(prop)
+        self.body.as_object().unwrap().contains_property(prop)
     }
 
     pub fn get(&self, prop: &str) -> Option<&Variant> {
-        self.body.get_property(prop)
+        self.body.as_object().unwrap().get_property(prop)
     }
 
     pub fn get_mut(&mut self, prop: &str) -> Option<&mut Variant> {
-        self.body.get_property_mut(prop)
+        self.body.as_object_mut().unwrap().get_property_mut(prop)
     }
 
     /// Get the value of a navigation property
@@ -105,11 +109,11 @@ impl Msg {
     /// The first level of the property expression for 'msg' must be a string, which means it must be
     /// `msg[msg.topic]` `msg['aaa']` or `msg.aaa`, and not `msg[12]`
     pub fn get_nav(&self, expr: &str) -> Option<&Variant> {
-        self.body.get_nav_property("msg", expr)
+        self.body.as_object().unwrap().get_nav_property(expr, &[PropexEnv::ThisRef("msg")])
     }
 
     pub fn get_nav_mut(&mut self, expr: &str) -> Option<&mut Variant> {
-        self.body.get_nav_property_mut("msg", expr)
+        self.body.as_object_mut().unwrap().get_nav_property_mut(expr, &[PropexEnv::ThisRef("msg")])
     }
 
     pub fn get_nav_stripped_mut(&mut self, expr: &str) -> Option<&mut Variant> {
@@ -131,11 +135,11 @@ impl Msg {
     }
 
     pub fn set(&mut self, prop: String, value: Variant) {
-        self.body.set_property(prop, value)
+        self.body.as_object_mut().unwrap().set_property(prop, value)
     }
 
     pub fn set_nav(&mut self, expr: &str, value: Variant, create_missing: bool) -> crate::Result<()> {
-        self.body.set_nav_property("msg", expr, value, create_missing)
+        self.body.set_nav(expr, value, create_missing, &[PropexEnv::ThisRef("msg")])
     }
 
     pub fn set_nav_stripped(&mut self, expr: &str, value: Variant, create_missing: bool) -> crate::Result<()> {
@@ -148,11 +152,11 @@ impl Msg {
     }
 
     pub fn remove(&mut self, prop: &str) -> Option<Variant> {
-        self.body.remove_property(prop)
+        self.body.as_object_mut().unwrap().remove_property(prop)
     }
 
     pub fn remove_nav(&mut self, prop: &str) -> Option<Variant> {
-        self.body.remove_nav_property(prop)
+        self.body.as_object_mut().unwrap().remove_nav_property(prop, &[PropexEnv::ThisRef("msg")])
     }
 }
 
@@ -178,23 +182,17 @@ impl Msg {
     }
 }
 
-impl Clone for Msg {
-    fn clone(&self) -> Self {
-        Self { link_call_stack: self.link_call_stack.clone(), body: self.body.clone() }
-    }
-}
-
 impl Index<&str> for Msg {
     type Output = Variant;
 
     fn index(&self, key: &str) -> &Self::Output {
-        &self.body[key]
+        &self.body.as_object().unwrap()[key]
     }
 }
 
 impl IndexMut<&str> for Msg {
     fn index_mut(&mut self, key: &str) -> &mut Self::Output {
-        self.body.entry(key.to_string()).or_default()
+        self.body.as_object_mut().unwrap().entry(key.to_string()).or_default()
     }
 }
 
@@ -205,7 +203,7 @@ impl serde::Serialize for Msg {
     {
         let mut map = serializer.serialize_map(None)?;
         map.serialize_entry(wellknown::LINK_SOURCE_PROPERTY, &self.link_call_stack)?;
-        for (k, v) in self.body.iter() {
+        for (k, v) in self.body.as_object().unwrap().iter() {
             map.serialize_entry(k, v)?;
         }
         map.end()
@@ -233,8 +231,8 @@ impl<'de> serde::Deserialize<'de> for Msg {
                 let mut link_call_stack = None;
                 let mut body: BTreeMap<String, Variant> = BTreeMap::new();
 
-                while let Some(key) = map.next_key()? {
-                    match key {
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
                         wellknown::LINK_SOURCE_PROPERTY => {
                             if link_call_stack.is_some() {
                                 return Err(de::Error::duplicate_field(wellknown::LINK_SOURCE_PROPERTY));
@@ -243,12 +241,12 @@ impl<'de> serde::Deserialize<'de> for Msg {
                         }
                         _ => {
                             let value = map.next_value()?;
-                            body.insert(key.to_string(), value);
+                            body.insert(key, value);
                         }
                     }
                 }
 
-                Ok(Msg { body, link_call_stack })
+                Ok(Msg { body: Variant::Object(body), link_call_stack })
             }
         }
 
@@ -268,6 +266,19 @@ impl<'js> js::FromJs<'js> for Msg {
                     for result in jo.props::<String, js::Value>() {
                         match result {
                             Ok((ref k, v)) => match k.as_str() {
+                                wellknown::MSG_ID_PROPERTY if v.is_string() => {
+                                    // covert
+                                    let uid_str: String = v.get()?;
+                                    let uid: u64 =
+                                        ElementId::from_str(uid_str.as_str()).map(|x| x.into()).map_err(|e| {
+                                            js::Error::FromJs {
+                                                from: "String",
+                                                to: "ElementID",
+                                                message: Some(format!("Failed to convert msg id '{}': {}", uid_str, e)),
+                                            }
+                                        })?;
+                                    body.insert(k.clone(), Variant::from(uid));
+                                }
                                 wellknown::LINK_SOURCE_PROPERTY => {
                                     if let Some(bytes) =
                                         v.as_object().and_then(|x| x.as_array_buffer()).and_then(|x| x.as_bytes())
@@ -292,7 +303,7 @@ impl<'js> js::FromJs<'js> for Msg {
                             }
                         }
                     }
-                    Ok(Msg { link_call_stack, body })
+                    Ok(Msg { link_call_stack, body: Variant::Object(body) })
                 } else {
                     Err(js::Error::FromJs { from: "JS object", to: "Variant::Object", message: None })
                 }
@@ -305,8 +316,13 @@ impl<'js> js::FromJs<'js> for Msg {
 #[cfg(feature = "js")]
 impl<'js> js::IntoJs<'js> for Msg {
     fn into_js(self, ctx: &js::Ctx<'js>) -> js::Result<js::Value<'js>> {
+        let msg_id = self.id();
         let jsv = self.body.into_js(ctx)?;
         let obj = jsv.as_object().unwrap();
+        if let Some(msg_id) = msg_id {
+            let msgid_atom = wellknown::MSG_ID_PROPERTY.into_js(ctx)?;
+            obj.set(msgid_atom, msg_id.to_string().into_js(ctx))?;
+        }
         {
             let link_source_atom = wellknown::LINK_SOURCE_PROPERTY.into_js(ctx)?;
             let link_source_bytes = bincode::serialize(&self.link_call_stack).map_err(|e| js::Error::IntoJs {
@@ -315,10 +331,65 @@ impl<'js> js::IntoJs<'js> for Msg {
                 message: Some(e.to_string()),
             })?;
             let link_source_buffer = js::ArrayBuffer::new(ctx.clone(), link_source_bytes)?;
-            let link_source_value = link_source_buffer.into_js(ctx)?;
-            obj.set(link_source_atom, link_source_value)?
+            obj.set(link_source_atom, link_source_buffer)?;
         }
         Ok(jsv)
+    }
+}
+
+impl Default for MsgHandle {
+    fn default() -> Self {
+        let msg = Msg {
+            body: Variant::Object(BTreeMap::from([
+                (wellknown::MSG_ID_PROPERTY.to_string(), Msg::generate_id_variant()),
+                ("payload".to_string(), Variant::Null),
+            ])),
+            link_call_stack: None,
+        };
+        MsgHandle::new(msg)
+    }
+}
+
+impl MsgHandle {
+    pub fn new(inner: Msg) -> Self {
+        MsgHandle { inner: (Arc::new(RwLock::new(inner))) }
+    }
+
+    pub fn with_body(body: BTreeMap<String, Variant>) -> Self {
+        let msg = Msg { link_call_stack: None, body: Variant::Object(body) };
+        MsgHandle::new(msg)
+    }
+
+    pub fn with_payload(payload: Variant) -> Self {
+        let msg = Msg {
+            link_call_stack: None,
+            body: Variant::Object(BTreeMap::from([
+                (wellknown::MSG_ID_PROPERTY.to_string(), Msg::generate_id_variant()),
+                ("payload".to_string(), payload),
+            ])),
+        };
+        MsgHandle::new(msg)
+    }
+
+    pub async fn read(&self) -> tokio::sync::RwLockReadGuard<Msg> {
+        self.inner.read().await
+    }
+
+    pub async fn write(&self) -> tokio::sync::RwLockWriteGuard<Msg> {
+        self.inner.write().await
+    }
+
+    pub async fn deep_clone(&self, new_id: bool) -> Self {
+        let mut inner = self.inner.read().await.clone();
+        if new_id {
+            inner.set_id(Msg::generate_id());
+        }
+        MsgHandle::new(inner)
+    }
+
+    pub async fn unwrap(self) -> Msg {
+        let inner_lock = Arc::try_unwrap(self.inner).expect("only one reference");
+        inner_lock.into_inner()
     }
 }
 
@@ -331,7 +402,7 @@ mod tests {
     #[test]
     fn test_get_nested_nav_property() {
         let jv = json!({"payload": "newValue", "lookup": {"a": 1, "b": 2}, "topic": "b"});
-        let msg = Msg::deserialize(&jv).unwrap();
+        let msg = Msg::deserialize(jv).unwrap();
         {
             assert!(msg.contains("lookup"));
             assert!(msg.contains("topic"));
@@ -342,7 +413,7 @@ mod tests {
     #[test]
     fn test_get_nested_nav_property_mut() {
         let jv = json!({"payload": "newValue", "lookup": {"a": 1, "b": 2}, "topic": "b"});
-        let mut msg = Msg::deserialize(&jv).unwrap();
+        let mut msg = Msg::deserialize(jv).unwrap();
         {
             assert!(msg.contains("lookup"));
             assert!(msg.contains("topic"));
@@ -355,7 +426,7 @@ mod tests {
     #[test]
     fn test_set_deep_msg_property() {
         let jv = json!( {"foo": {"bar": "foo"}, "name": "hello"});
-        let mut msg = Msg::deserialize(&jv).unwrap();
+        let mut msg = Msg::deserialize(jv).unwrap();
         {
             let old_foo = msg.get("foo").unwrap();
             assert!(old_foo.is_object());
@@ -380,7 +451,7 @@ mod tests {
     #[test]
     fn should_be_ok_with_empty_object_variant() {
         let jv = json!({});
-        let mut msg = Msg::deserialize(&jv).unwrap();
+        let mut msg = Msg::deserialize(jv).unwrap();
 
         msg.set_nav("foo.bar", "changed2".into(), true).unwrap();
         assert!(msg.contains("foo"));

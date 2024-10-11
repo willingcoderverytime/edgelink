@@ -46,13 +46,14 @@ cargo build -r
 >
 > To compile `rquickjs`, which is required by the project, you will need to install Microsoft Visual C++ (MSVC) and the corresponding Windows Software Development Kit (SDK).
 
-The toolchains tested are as follows:
+The toolchains tested are as follows(see GitHub Actions for details):
 
 * `x86_64-pc-windows-msvc`
 * `x86_64-pc-windows-gnu`
 * `x86_64-unknown-linux-gnu`
 * `aarch64-unknown-linux-gnu`
 * `armv7-unknown-linux-gnueabihf`
+* `armv7-unknown-linux-gnueabi`
 
 ### 2. Run
 
@@ -85,14 +86,15 @@ cargo test --all
 Running integration tests requires first installing Python 3.9+ and the corresponding Pytest dependencies:
 
 ```bash
-pip install -U -r ./tests/requirements.txt
+pip install -r ./tests/requirements.txt
 ```
 
 Then execute the following command:
 
 ```bash
-cargo build -r
-python -B -m pytest tests
+set PYO3_PYTHON=YOUR_PYTHON_EXECUTABLE_PATH # Windows only
+cargo build --all
+py.test
 ```
 
 ## Configuration
@@ -110,7 +112,7 @@ The heavy check mark ( :heavy_check_mark: ) below indicates that this feature ha
 - [x] :heavy_check_mark: Flow
 - [x] :heavy_check_mark: Sub-flow
 - [x] Group
-- [x] Environment Variables (WIP)
+- [x] :heavy_check_mark: Environment Variables
 - [ ] Context
     - [x] Memory storage
     - [ ] Local file-system storage
@@ -124,32 +126,34 @@ The heavy check mark ( :heavy_check_mark: ) below indicates that this feature ha
 
 ### The Current Status of Nodes:
 
+Refer [REDNODES-SPECS-DIFF.md](tests/REDNODES-SPECS-DIFF.md) to view the details of the currently implemented nodes that comply with the Node-RED specification tests.
+
 - Core nodes:
     - Common nodes:
         - [x] :heavy_check_mark: Console-JSON (For integration tests)
         - [x] :heavy_check_mark: Inject
         - [x] Debug (WIP)
         - [x] :heavy_check_mark: Complete
-        - [ ] Catch
-        - [ ] Status
+        - [x] Catch
+        - [x] Status
         - [x] :heavy_check_mark: Link In
         - [x] :heavy_check_mark: Link Call
         - [x] :heavy_check_mark: Link Out
-        - [x] Comment (Ignored automatically)
+        - [x] :heavy_check_mark: Comment (Ignored automatically)
         - [x] GlobalConfig (WIP)
-        - [x] Unknown
+        - [x] :heavy_check_mark: Unknown
         - [x] :heavy_check_mark: Junction
     - Function nodes:
         - [x] Function (WIP)
             - [x] Basic functions
-            - [ ] `node` object
-            - [ ] `context` object
-            - [ ] `flow` object
-            - [ ] `global` object
+            - [x] `node` object (WIP)
+            - [x] `context` object
+            - [x] `flow` object
+            - [x] `global` object
             - [x] `RED.util` object
             - [x] `env` object
         - [ ] Switch
-        - [ ] Change
+        - [x] :heavy_check_mark: Change
         - [x] :heavy_check_mark: Range
         - [ ] Template
         - [ ] Delay
@@ -191,7 +195,7 @@ The heavy check mark ( :heavy_check_mark: ) below indicates that this feature ha
 
 ## Roadmap
 
-Check out our [roadmap](docs/ROADMAP.md) to get a glimpse of the upcoming features and milestones.
+Check out our [milestones](https://github.com/oldrev/edgelink/milestones) to get a glimpse of the upcoming features and milestones.
 
 ## Contribution
 
@@ -205,13 +209,9 @@ If you want to support the development of this project, you could consider buyin
 
 [![Support via PayPal.me](assets/paypal_button.svg)](https://www.paypal.me/oldrev)
 
-## Known Issues
+## Issues, Feedback and Support
 
-Please refer to [ISSUES.md](docs/ISSUES.md) for a list of known issues and workarounds.
-
-## Feedback and Support
-
-We welcome your feedback! If you encounter any issues or have suggestions, please open an [issue](https://github.com/edge-link/edgelink.rs/issues).
+We welcome your feedback! If you encounter any issues or have suggestions, please open an [issue](https://github.com/edge-link/edgelink/issues).
 
 E-mail: oldrev(at)gmail.com
 

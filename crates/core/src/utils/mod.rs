@@ -2,7 +2,12 @@ use rand::Rng;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod async_util;
+
+#[allow(clippy::all)]
+pub mod graph;
+
 pub mod time;
+pub mod topo;
 
 pub fn generate_uid() -> u64 {
     let mut rng = rand::thread_rng();
