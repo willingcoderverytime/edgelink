@@ -6,16 +6,16 @@ use std::sync::Arc;
 
 // 3rd-party libs
 use clap::Parser;
+use runtime::engine::Engine;
+use runtime::registry::RegistryHandle;
 use serde::Deserialize;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use edgelink_core::runtime::engine::FlowEngine;
 use edgelink_core::runtime::model::*;
-use edgelink_core::runtime::registry::{Registry, RegistryBuilder};
+use edgelink_core::runtime::registry::RegistryBuilder;
 use edgelink_core::text::json_seq;
 use edgelink_core::*;
-use runtime::model::ElementId;
 
 include!(concat!(env!("OUT_DIR"), "/__use_node_plugins.rs"));
 
@@ -30,13 +30,13 @@ pub use cliargs::*;
 pub struct MsgInjectionEntry {
     pub nid: ElementId,
 
-    pub msg: Arc<RwLock<Msg>>,
+    pub msg: MsgHandle,
 }
 
 #[derive(Debug)]
 struct App {
-    _registry: Arc<dyn Registry>,
-    engine: Arc<FlowEngine>,
+    _registry: RegistryHandle,
+    engine: Engine,
     msgs_to_inject: Mutex<Vec<MsgInjectionEntry>>,
 }
 
@@ -85,7 +85,7 @@ impl App {
                                     &json_value["nid"],
                                 )
                                 .unwrap(),
-                                msg: Arc::new(RwLock::new(Msg::deserialize(&json_value["msg"])?)),
+                                msg: MsgHandle::new(Msg::deserialize(&json_value["msg"])?),
                             };
                             msgs_to_inject.push(entry);
                         }
@@ -97,9 +97,9 @@ impl App {
                 let json_str = String::from_utf8_lossy(&buffer);
                 serde_json::from_str(&json_str)?
             };
-            FlowEngine::new_with_json(reg.clone(), &flows_json_value, app_config)?
+            Engine::with_json(&reg, flows_json_value, app_config)?
         } else {
-            FlowEngine::new_with_flows_file(reg.clone(), &elargs.flows_path, app_config)?
+            Engine::with_flows_file(&reg, &elargs.flows_path, app_config)?
         };
 
         Ok(App { _registry: reg, engine, msgs_to_inject: Mutex::new(msgs_to_inject) })
@@ -154,11 +154,11 @@ fn load_config(cli_args: &CliArgs) -> anyhow::Result<Option<config::Config>> {
     // Load configuration from default, development, and production files
     let home_dir = dirs_next::home_dir()
         .map(|x| x.join(".edgelink").to_string_lossy().to_string())
-        .expect("Cannot got the `~/home` directory");
+        .expect("Cannot get the `~/home` directory");
 
     let edgelink_home_dir = cli_args.home.clone().or(std::env::var("EDGELINK_HOME").ok()).or(Some(home_dir));
 
-    let run_env = cli_args.env.clone().and(std::env::var("EDGELINK_RUN_ENV").ok()).unwrap_or("dev".to_string());
+    let run_env = cli_args.env.clone().or(std::env::var("EDGELINK_RUN_ENV").ok()).unwrap_or("dev".to_string());
 
     if cli_args.verbose > 0 {
         if let Some(ref x) = edgelink_home_dir {
@@ -168,18 +168,26 @@ fn load_config(cli_args: &CliArgs) -> anyhow::Result<Option<config::Config>> {
 
     if let Some(md) = edgelink_home_dir.as_ref().and_then(|x| std::fs::metadata(x).ok()) {
         if md.is_dir() {
-            let cfg = config::Config::builder()
-                .add_source(config::File::with_name("edgelinkd.toml"))
-                .add_source(config::File::with_name(&format!("edgelinkd.{}.toml", run_env)).required(false))
-                .set_override("home_dir", edgelink_home_dir)?
-                .set_override("run_env", run_env)?
-                .set_override("node.msg_queue_capacity", 1)?
-                .build()?;
-            return Ok(Some(cfg));
+            let mut builder = config::Config::builder();
+
+            builder = if let Some(hd) = edgelink_home_dir {
+                builder
+                    .add_source(config::File::with_name(&format!("{}/edgelinkd.toml", hd)).required(false))
+                    .add_source(config::File::with_name(&format!("{}/edgelinkd.{}.toml", hd, run_env)).required(false))
+                    .set_override("home_dir", hd)?
+            } else {
+                builder
+            };
+
+            builder = builder
+                .set_override("run_env", run_env)? // override run_env
+                .set_override("node.msg_queue_capacity", 1)?;
+            let config = builder.build()?;
+            return Ok(Some(config));
         }
     }
     if cli_args.verbose > 0 {
-        eprintln!("The `$EDGELINK_HOME` does not existed!");
+        eprintln!("The `$EDGELINK_HOME` directory does not exist!");
     }
     Ok(None)
 }

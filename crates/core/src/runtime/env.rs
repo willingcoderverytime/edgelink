@@ -1,5 +1,4 @@
 use std::{
-    cmp::Ordering,
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock, Weak},
 };
@@ -9,27 +8,48 @@ use itertools::Itertools;
 use nom;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
+use utils::topo::TopologicalSorter;
 
 use crate::runtime::model::{RedPropertyType, Variant};
 use crate::*;
 
-#[derive(Debug)]
-pub struct EnvStore {
-    pub parent: RwLock<Option<Weak<EnvStore>>>,
-    pub envs: DashMap<String, Variant>,
+#[derive(Debug, Clone)]
+pub struct Envs {
+    inner: Arc<EnvStore>,
 }
 
-impl EnvStore {
+#[derive(Debug, Clone)]
+pub struct WeakEnvs {
+    inner: Weak<EnvStore>,
+}
+
+impl WeakEnvs {
+    pub fn upgrade(&self) -> Option<Envs> {
+        Weak::upgrade(&self.inner).map(|x| Envs { inner: x })
+    }
+}
+
+#[derive(Debug)]
+struct EnvStore {
+    parent: RwLock<Option<WeakEnvs>>,
+    envs: DashMap<String, Variant>,
+}
+
+impl Envs {
+    pub fn downgrade(&self) -> WeakEnvs {
+        WeakEnvs { inner: Arc::downgrade(&self.inner) }
+    }
+
     pub fn evalute_env(&self, env_expr: &str) -> Option<Variant> {
         self.get_normalized(env_expr)
     }
 
-    pub fn get_env(&self, key: &str) -> Option<Variant> {
-        if let Some(value) = self.envs.get(key) {
+    fn get_raw_env(&self, key: &str) -> Option<Variant> {
+        if let Some(value) = self.inner.envs.get(key) {
             Some(value.clone())
         } else {
-            let parent = self.parent.read().ok()?;
-            parent.as_ref().and_then(|p| p.upgrade()).and_then(|p| p.evalute_env(key))
+            let parent = self.inner.parent.read().ok()?;
+            parent.as_ref().and_then(|p| p.upgrade()).and_then(|p| p.get_raw_env(key))
         }
     }
 
@@ -38,13 +58,13 @@ impl EnvStore {
         if trimmed.starts_with("${") && env_expr.ends_with("}") {
             // ${ENV_VAR}
             let to_match = &trimmed[2..(env_expr.len() - 1)];
-            self.get_env(to_match)
+            self.get_raw_env(to_match)
         } else if !trimmed.contains("${") {
             // ENV_VAR
-            self.get_env(trimmed)
+            self.get_raw_env(trimmed)
         } else {
             // FOO${ENV_VAR}BAR
-            Some(Variant::String(replace_vars(trimmed, |env_name| match self.get_env(env_name) {
+            Some(Variant::String(replace_vars(trimmed, |env_name| match self.get_raw_env(env_name) {
                 Some(v) => v.to_string().unwrap(), // FIXME
                 _ => "".to_string(),
             })))
@@ -62,15 +82,15 @@ struct EnvEntry {
     pub type_: RedPropertyType,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct EnvStoreBuilder {
-    parent: Option<Weak<EnvStore>>,
+    parent: Option<WeakEnvs>,
     envs: HashMap<String, Variant>,
 }
 
 impl EnvStoreBuilder {
-    pub fn with_parent(mut self, parent: &Arc<EnvStore>) -> Self {
-        self.parent = Some(Arc::downgrade(parent));
+    pub fn with_parent(mut self, parent: &Envs) -> Self {
+        self.parent = Some(parent.downgrade());
         self
     }
 
@@ -90,21 +110,22 @@ impl EnvStoreBuilder {
                     .collect()
             };
 
-            // TODO: Maybe dependency sorting? The Node-RED didn't have it.
-            entries.sort_by(|a, b| match (a.type_, b.type_) {
-                (RedPropertyType::Env, RedPropertyType::Env) => Ordering::Equal,
-                (RedPropertyType::Env, _) => Ordering::Less,
-                (_, RedPropertyType::Env) => Ordering::Greater,
-                _ => Ordering::Equal,
-            });
+            let mut topo = TopologicalSorter::new();
+            for entry in entries.iter() {
+                topo.add_vertex(entry.name.as_str());
+                if entry.type_ == RedPropertyType::Env {
+                    topo.add_dep(entry.name.as_str(), entry.value.as_str());
+                }
+            }
+            let sorted_keys = topo.dependency_sort();
 
-            for e in entries.iter() {
-                if let Ok(var) = self.evaluate(&e.value, e.type_) {
-                    if !self.envs.contains_key(&e.name) {
+            for key in sorted_keys.iter() {
+                if let Some(e) = entries.iter().find(|x| &x.name == key) {
+                    if let Ok(var) = self.evaluate(&e.value, e.type_) {
                         self.envs.insert(e.name.clone(), var);
+                    } else {
+                        log::warn!("Failed to evaluate environment variable property: {:?}", e);
                     }
-                } else {
-                    log::warn!("Failed to evaluate environment variable property: {:?}", e);
                 }
             }
         } else {
@@ -120,18 +141,34 @@ impl EnvStoreBuilder {
         self
     }
 
-    pub fn extends<T: IntoIterator<Item = (String, Variant)>>(mut self, iter: T) -> Self {
-        for (k, v) in iter {
-            self.envs.insert(k, v);
+    pub fn extends(mut self, other_iter: impl IntoIterator<Item = (String, Variant)>) -> Self {
+        for (k, v) in other_iter {
+            self.envs.entry(k).or_insert(v);
         }
         self
     }
 
-    pub fn build(self) -> Arc<EnvStore> {
-        let mut this = EnvStore { parent: RwLock::new(self.parent), envs: DashMap::with_capacity(self.envs.len()) };
-        this.envs.extend(self.envs);
+    pub fn extends_with(mut self, other: &Envs) -> Self {
+        for it in other.inner.envs.iter() {
+            if !self.envs.contains_key(it.key()) {
+                self.envs.insert(it.key().clone(), it.value().clone());
+            }
+        }
+        self
+    }
 
-        Arc::new(this)
+    pub fn update_with(mut self, other: &Envs) -> Self {
+        for guard in other.inner.envs.iter() {
+            self.envs.insert(guard.key().clone(), guard.value().clone());
+        }
+        self
+    }
+
+    pub fn build(self) -> Envs {
+        let mut inner = EnvStore { parent: RwLock::new(self.parent), envs: DashMap::with_capacity(self.envs.len()) };
+        inner.envs.extend(self.envs);
+
+        Envs { inner: Arc::new(inner) }
     }
 
     fn evaluate(&self, value: &str, type_: RedPropertyType) -> crate::Result<Variant> {
@@ -150,21 +187,21 @@ impl EnvStoreBuilder {
                 let arr = Variant::deserialize(&jv)?;
                 let bytes = arr
                     .to_bytes()
-                    .ok_or(EdgelinkError::InvalidData(format!("Expected an array of bytes, got: {:?}", value)))?;
-                Ok(Variant::from(bytes))
+                    .ok_or(EdgelinkError::BadArgument("value"))
+                    .with_context(|| format!("Expected an array of bytes, got: {:?}", value))?;
+                Ok(Variant::Bytes(bytes))
             }
 
             RedPropertyType::Jsonata => todo!(),
 
-            RedPropertyType::Env => {
-                match self.normalized_and_get_existed(value) {
-                    Some(ev) => Ok(ev),
-                    _ => Err(EdgelinkError::InvalidData(format!("Cannot found the environment variable: '{}'", value))
-                        .into()),
-                }
-            }
+            RedPropertyType::Env => match self.normalized_and_get_existed(value) {
+                Some(ev) => Ok(ev),
+                _ => Err(EdgelinkError::BadArgument("value"))
+                    .with_context(|| format!("Cannot found the environment variable: '{}'", value)),
+            },
 
-            _ => Err(EdgelinkError::BadArguments(format!("Unsupported environment varibale type: '{}'", value)).into()),
+            _ => Err(EdgelinkError::BadArgument("type_"))
+                .with_context(|| format!("Unsupported environment varibale type: '{}'", value)),
         }
     }
 

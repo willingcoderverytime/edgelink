@@ -9,6 +9,7 @@ use crate::runtime::flow::Flow;
 use crate::runtime::model::*;
 use crate::runtime::nodes::*;
 use edgelink_macro::*;
+use crate::utils::constants::FLOW_STR;
 
 #[derive(Debug)]
 #[flow_node("change")]
@@ -89,7 +90,7 @@ impl FlowNodeBehavior for ChangeNode {
                     // We always relay the message, regardless of whether the rules are followed or not.
                     node.apply_rules(&mut msg_guard).await;
                 }
-                node.fan_out_one(&Envelope { port: 0, msg }, cancel.clone()).await
+                node.fan_out_one(Envelope { port: 0, msg }, cancel.clone()).await
             })
             .await;
         }
@@ -98,7 +99,7 @@ impl FlowNodeBehavior for ChangeNode {
 
 impl ChangeNode {
     fn build(_flow: &Flow, state: FlowNode, config: &RedFlowNodeConfig) -> crate::Result<Box<dyn FlowNodeBehavior>> {
-        let json = handle_legacy_json(config.json.clone())?;
+        let json = handle_legacy_json(config.rest.clone())?;
         let change_config = ChangeNodeConfig::deserialize(&json)?;
         let node = ChangeNode { base: state, config: change_config };
         Ok(Box::new(node))
@@ -146,58 +147,16 @@ impl ChangeNode {
         match rule.t {
             RuleKind::Set => self.apply_rule_set(rule, msg, to_value).await,
             RuleKind::Change => self.apply_rule_change(rule, msg, to_value).await,
-            RuleKind::Delete => {
-                self.apply_rule_delete(rule, msg).await?;
-                Ok(())
-            }
-            RuleKind::Move => Ok(()),
+            RuleKind::Delete => self.apply_rule_delete(rule, msg).await,
+            RuleKind::Move => self.apply_rule_move(rule, msg).await,
         }
     }
 
     async fn apply_rule_set(&self, rule: &Rule, msg: &mut Msg, to_value: Option<Variant>) -> crate::Result<()> {
         assert!(rule.t == RuleKind::Set);
-        match rule.pt {
-            RedPropertyType::Msg => {
-                if let Some(to_value) = to_value {
-                    msg.set_nav_stripped(&rule.p, to_value, true)?;
-                } else {
-                    // Equals the `undefined` in JS
-                    if msg.contains(&rule.p) {
-                        // TODO remove by propex
-                        msg.remove(&rule.p);
-                    }
-                }
-                Ok(())
-            }
-
-            RedPropertyType::Global => {
-                if let Some(to_value) = to_value {
-                    let engine = self.get_flow().upgrade().and_then(|flow| flow.engine.upgrade()).unwrap(); // FIXME TODO
-
-                    let ctx_prop = crate::runtime::context::parse_store(&rule.p)?;
-                    engine.get_context().set_one(&ctx_prop, Some(to_value)).await
-                } else {
-                    Err(EdgelinkError::BadArguments("The target value is None".into()).into())
-                }
-            }
-
-            RedPropertyType::Flow => {
-                if let Some(to_value) = to_value {
-                    let flow = self.get_flow().upgrade().unwrap(); // FIXME TODO
-                    let fe = flow as Arc<dyn FlowsElement>;
-                    let ctx_prop = crate::runtime::context::parse_store(&rule.p)?;
-                    fe.context().set_one(&ctx_prop, Some(to_value)).await
-                } else {
-                    Err(EdgelinkError::BadArguments("The target value is None".into()).into())
-                }
-            }
-
-            _ => Err(EdgelinkError::NotSupported(
-                "We only support to set message property and flow/global context variables".into(),
-            )
-            .into()),
-        }
+        self.set_property(&rule.p, rule.pt, to_value, msg).await
     }
+
     async fn apply_rule_change(&self, rule: &Rule, msg: &mut Msg, to_value: Option<Variant>) -> crate::Result<()> {
         assert!(rule.t == RuleKind::Change);
 
@@ -236,10 +195,6 @@ impl ChangeNode {
         };
         */
 
-        dbg!(&current);
-        dbg!(&from_value);
-        dbg!(current == from_value);
-        dbg!(&rule);
         match rule.pt {
             //FIXME unwrap
             RedPropertyType::Msg => match (&current, reduced_from_type) {
@@ -267,10 +222,6 @@ impl ChangeNode {
                     // Otherwise we search and replace
                     // TODO: In the future, this string needs to be optimized.
                     let replaced = current_str.replace(&from_value.to_string()?, &to_value.to_string()?);
-                    dbg!(current_str);
-                    dbg!(&from_value);
-                    dbg!(&to_value);
-                    dbg!(&replaced);
                     msg.set_nav_stripped(&rule.p, Variant::String(replaced), false)?;
                 }
 
@@ -288,18 +239,19 @@ impl ChangeNode {
             },
 
             RedPropertyType::Flow | RedPropertyType::Global => {
-                let ctx = match rule.pt {
-                    RedPropertyType::Flow => self.get_flow().upgrade().unwrap().context(),
-                    RedPropertyType::Global => self.get_engine().unwrap().get_context(),
-                    _ => panic!("We are so over!"),
-                };
+                let ctx = self.get_context_by_property_type(rule.pt)?;
                 match (&current, reduced_from_type) {
-                    //FIXME unwrap
                     (Variant::String(_), ReducedType::Num | ReducedType::Bool | ReducedType::Str)
                         if current == from_value =>
                     {
-                        let ctx_prop = crate::runtime::context::parse_store(&rule.p)?;
-                        ctx.set_one(&ctx_prop, Some(to_value)).await?;
+                        let ctx_prop = crate::runtime::context::evaluate_key(&rule.p)?;
+                        ctx.set_one(
+                            ctx_prop.store,
+                            ctx_prop.key,
+                            Some(to_value),
+                            &[PropexEnv::ExtRef("msg", msg.as_variant())],
+                        )
+                        .await?;
                     }
 
                     (Variant::String(ref current_str), ReducedType::Regex) => {
@@ -310,26 +262,50 @@ impl ChangeNode {
                             (Some(RedPropertyType::Bool), "false") => to_value,
                             _ => Variant::String(replaced.into()),
                         };
-                        let ctx_prop = crate::runtime::context::parse_store(&rule.p)?;
-                        ctx.set_one(&ctx_prop, Some(value_to_set)).await?;
+                        let ctx_prop = crate::runtime::context::evaluate_key(&rule.p)?;
+                        ctx.set_one(
+                            ctx_prop.store,
+                            ctx_prop.key,
+                            Some(value_to_set),
+                            &[PropexEnv::ExtRef("msg", msg.as_variant())],
+                        )
+                        .await?;
                     }
 
                     (Variant::String(ref cs), _) => {
                         // Otherwise we search and replace
                         // TODO: In the future, this string needs to be optimized.
                         let replaced = cs.replace(from_value.to_string()?.as_str(), to_value.to_string()?.as_str());
-                        let ctx_prop = crate::runtime::context::parse_store(&rule.p)?;
-                        ctx.set_one(&ctx_prop, Some(Variant::String(replaced))).await?;
+                        let ctx_prop = crate::runtime::context::evaluate_key(&rule.p)?;
+                        ctx.set_one(
+                            ctx_prop.store,
+                            ctx_prop.key,
+                            Some(Variant::String(replaced)),
+                            &[PropexEnv::ExtRef("msg", msg.as_variant())],
+                        )
+                        .await?;
                     }
 
                     (Variant::Number(_), ReducedType::Num) if from_value == current => {
-                        let ctx_prop = crate::runtime::context::parse_store(&rule.p)?;
-                        ctx.set_one(&ctx_prop, Some(to_value)).await?;
+                        let ctx_prop = crate::runtime::context::evaluate_key(&rule.p)?;
+                        ctx.set_one(
+                            ctx_prop.store,
+                            ctx_prop.key,
+                            Some(to_value),
+                            &[PropexEnv::ExtRef("msg", msg.as_variant())],
+                        )
+                        .await?;
                     }
 
                     (Variant::Bool(_), ReducedType::Bool) if from_value == current => {
-                        let ctx_prop = crate::runtime::context::parse_store(&rule.p)?;
-                        ctx.set_one(&ctx_prop, Some(to_value)).await?;
+                        let ctx_prop = crate::runtime::context::evaluate_key(&rule.p)?;
+                        ctx.set_one(
+                            ctx_prop.store,
+                            ctx_prop.key,
+                            Some(to_value),
+                            &[PropexEnv::ExtRef("msg", msg.as_variant())],
+                        )
+                        .await?;
                     }
 
                     _ => {
@@ -349,42 +325,112 @@ impl ChangeNode {
         }
 
         Ok(())
-    }
+    } // apply_rule_change
 
     async fn apply_rule_delete(&self, rule: &Rule, msg: &mut Msg) -> crate::Result<()> {
         assert!(rule.t == RuleKind::Delete);
-        match rule.pt {
+        self.delete_property(&rule.p, rule.pt, msg).await
+    } // apply_rule_delete
+
+    async fn apply_rule_move(&self, rule: &Rule, msg: &mut Msg) -> crate::Result<()> {
+        assert!(rule.t == RuleKind::Move);
+        if !matches!(rule.pt, RedPropertyType::Flow | RedPropertyType::Global | RedPropertyType::Msg) {
+            return Err(EdgelinkError::BadArgument("rule")).with_context(|| "Invalid `pt` type");
+        }
+
+        if !matches!(rule.tot, Some(RedPropertyType::Flow) | Some(RedPropertyType::Global) | Some(RedPropertyType::Msg))
+        {
+            return Err(EdgelinkError::BadArgument("rule")).with_context(|| "Invalid `tot` type");
+        }
+
+        let (to, tot) = if let (Some(to), Some(tot)) = (&rule.to, rule.tot) {
+            (to, tot)
+        } else {
+            return Err(EdgelinkError::BadArgument("rule")).with_context(|| "`to` and `tot` cannot be none or empty");
+        };
+
+        // let target_prop = rule.to.as_ref().unwrap().as_str();
+        let current = match eval::evaluate_node_property(&rule.p, rule.pt, Some(self), None, Some(msg)).await {
+            Ok(v) => v,
+            Err(_) => return Ok(()),
+        };
+        // Remove the from side
+        self.set_property(&rule.p, rule.pt, None, msg).await?;
+        self.set_property(to, tot, Some(current), msg).await
+    } // apply_rule_move
+
+    fn get_context_by_property_type(&self, pt: RedPropertyType) -> crate::Result<Arc<Context>> {
+        let res = match pt {
+            RedPropertyType::Flow => self.flow().map(|x| x.context()),
+            RedPropertyType::Global => self.engine().map(|x| x.context()),
+            _ => None,
+        };
+        res.ok_or(EdgelinkError::InvalidOperation("Failed to get context".to_string()).into())
+    }
+
+    async fn set_property(
+        &self,
+        target_prop: &str,
+        target_type: RedPropertyType,
+        to_value: Option<Variant>,
+        msg: &mut Msg,
+    ) -> crate::Result<()> {
+        match target_type {
             RedPropertyType::Msg => {
-                let _ = msg.remove_nav(&rule.p).ok_or(EdgelinkError::NotSupported(format!(
-                    "Cannot remove the property '{}' in the msg",
-                    rule.p
-                )))?;
+                if let Some(to_value) = to_value {
+                    log::info!("{} = {:?}", target_prop, &to_value);
+                    msg.set_nav_stripped(target_prop, to_value, true)?;
+                } else {
+                    // Equals the `undefined` in JS
+                    if msg.contains(target_prop) {
+                        // TODO remove by propex
+                        msg.remove(target_prop);
+                    }
+                }
                 Ok(())
             }
 
-            RedPropertyType::Global => {
-                // FIXME TODO
-                // let csp = context::parse_context_store(&rule.p)?;
-                // engine.get_context().set_one("memory", csp.key, to_value).await
-                let engine = self.get_flow().upgrade().and_then(|flow| flow.engine.upgrade()).unwrap();
-                let ctx_prop = crate::runtime::context::parse_store(&rule.p)?;
-                engine.get_context().set_one(&ctx_prop, None).await
-                // Setting it to "None" means to delete.
+            RedPropertyType::Global | RedPropertyType::Flow => {
+                let ctx = self.get_context_by_property_type(target_type)?;
+                if let Some(to_value) = to_value {
+                    let ctx_prop = crate::runtime::context::evaluate_key(target_prop)?;
+                    ctx.set_one(
+                        ctx_prop.store,
+                        ctx_prop.key,
+                        Some(to_value),
+                        &[PropexEnv::ExtRef("msg", msg.as_variant())],
+                    )
+                    .await
+                } else {
+                    Err(EdgelinkError::BadArgument("to_value")).with_context(|| "The target value is None".to_string())
+                }
             }
 
-            RedPropertyType::Flow => {
-                // FIXME TODO
-                // let csp = context::parse_context_store(&rule.p)?;
-                // engine.get_context().set_one("memory", csp.key, to_value).await
-                let flow = self.get_flow().upgrade().unwrap();
-                let fe = flow as Arc<dyn FlowsElement>;
-                let ctx_prop = crate::runtime::context::parse_store(&rule.p)?;
-                fe.context().set_one(&ctx_prop, None).await
+            _ => Err(EdgelinkError::NotSupported(
+                "We only support to set message property and flow/global context variables".into(),
+            )
+            .into()),
+        }
+    }
+
+    async fn delete_property(&self, prop: &str, prop_type: RedPropertyType, msg: &mut Msg) -> crate::Result<()> {
+        match prop_type {
+            RedPropertyType::Msg => {
+                let _ = msg
+                    .remove_nav(prop)
+                    .ok_or(EdgelinkError::NotSupported(format!("cannot remove the property '{}' in the msg", prop)))?;
+                Ok(())
+            }
+
+            RedPropertyType::Global | RedPropertyType::Flow => {
+                let ctx = self.get_context_by_property_type(prop_type)?;
+                let ctx_prop = crate::runtime::context::evaluate_key(prop)?;
+                ctx.set_one(ctx_prop.store, ctx_prop.key, None, &[PropexEnv::ExtRef("msg", msg.as_variant())]).await
                 // Setting it to "None" means to delete.
             }
 
             _ => Err(EdgelinkError::NotSupported(
-                "The 'change' node only allows deleting the 'msg' and global/flow context propertie".into(),
+                "the 'change' node only allows deleting the 'msg' and global/flow context propertie".into(),
             )
             .into()),
         }
@@ -447,7 +493,7 @@ fn handle_legacy_json(n: Value) -> crate::Result<Value> {
         }
 
         if let (Some(t), Some(fromt), Some(from)) = (rule.get("t"), rule.get("fromt"), rule.get("from")) {
-            if t == "change" && fromt != "msg" && fromt != "flow" && fromt != "global" {
+            if t == "change" && fromt != "msg" && fromt != FLOW_STR && fromt != "global" {
                 let from_str = from.as_str().unwrap_or("");
                 let mut from_re = from_str.to_string();
 

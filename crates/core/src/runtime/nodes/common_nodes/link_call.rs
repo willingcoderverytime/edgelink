@@ -37,7 +37,7 @@ struct LinkCallNodeConfig {
 
 #[derive(Debug)]
 struct MsgEvent {
-    _msg: Arc<RwLock<Msg>>,
+    _msg: MsgHandle,
     timeout_handle: tokio::task::AbortHandle,
 }
 
@@ -67,8 +67,8 @@ pub(crate) struct LinkCallNode {
 
 impl LinkCallNode {
     fn build(flow: &Flow, state: FlowNode, config: &RedFlowNodeConfig) -> crate::Result<Box<dyn FlowNodeBehavior>> {
-        let link_call_config = LinkCallNodeConfig::deserialize(&config.json)?;
-        let engine = flow.engine.upgrade().expect("The engine must be created!");
+        let link_call_config = LinkCallNodeConfig::deserialize(&config.rest)?;
+        let engine = flow.engine().expect("The engine must be created!");
 
         let mut linked_nodes = Vec::new();
         if link_call_config.link_type == LinkType::Static {
@@ -94,34 +94,26 @@ impl LinkCallNode {
         Ok(Box::new(node))
     }
 
-    async fn uow(&self, node: Arc<Self>, msg: Arc<RwLock<Msg>>, cancel: CancellationToken) -> crate::Result<()> {
+    async fn uow(&self, node: Arc<Self>, msg: MsgHandle, cancel: CancellationToken) -> crate::Result<()> {
         self.forward_call_msg(node.clone(), msg, cancel).await
     }
 
-    async fn forward_call_msg(
-        &self,
-        node: Arc<Self>,
-        msg: Arc<RwLock<Msg>>,
-        cancel: CancellationToken,
-    ) -> crate::Result<()> {
-        let entry_id;
-        let cloned_msg;
-        {
+    async fn forward_call_msg(&self, node: Arc<Self>, msg: MsgHandle, cancel: CancellationToken) -> crate::Result<()> {
+        let (entry_id, cloned_msg) = {
             let mut locked_msg = msg.write().await;
-            entry_id = ElementId::with_u64(self.event_id_atomic.fetch_add(1, Ordering::Relaxed));
+            let entry_id = ElementId::with_u64(self.event_id_atomic.fetch_add(1, Ordering::Relaxed));
             locked_msg.push_link_source(LinkCallStackEntry { id: entry_id, link_call_node_id: self.id() });
-            cloned_msg = Arc::new(RwLock::new(locked_msg.clone()));
-        }
+            (entry_id, msg.clone())
+        };
         {
             let mut mut_state = self.mut_state.lock().await;
             let timeout_handle = mut_state.timeout_tasks.spawn(async move { node.timeout_task(entry_id).await });
             mut_state.msg_events.insert(entry_id, MsgEvent { _msg: cloned_msg, timeout_handle });
         }
-        self.fan_out_linked_msg(msg, cancel.clone()).await?;
-        Ok(())
+        self.fan_out_linked_msg(msg, cancel.clone()).await
     }
 
-    async fn fan_out_linked_msg(&self, msg: Arc<RwLock<Msg>>, cancel: CancellationToken) -> crate::Result<()> {
+    async fn fan_out_linked_msg(&self, msg: MsgHandle, cancel: CancellationToken) -> crate::Result<()> {
         match self.config.link_type {
             LinkType::Static => {
                 for link_node in self.linked_nodes.iter() {
@@ -155,11 +147,11 @@ impl LinkCallNode {
     fn get_dynamic_target_node(&self, msg: &Msg) -> crate::Result<Option<Arc<dyn FlowNodeBehavior>>> {
         let target_field = msg
             .get("target")
-            .ok_or(EdgelinkError::InvalidData("There are no `target` field in the msg!".to_string()))?;
+            .ok_or(EdgelinkError::InvalidOperation("There are no `target` field in the msg!".to_string()))?;
 
         let result = match target_field {
             Variant::String(target_name) => {
-                let engine = self.get_engine().expect("The engine must be instanced!");
+                let engine = self.engine().expect("The engine must be instanced!");
                 // Firstly, we are looking into the node ids
                 if let Some(parsed_id) = parse_red_id_str(target_name) {
                     let found = engine.find_flow_node_by_id(&parsed_id);
@@ -171,7 +163,7 @@ impl LinkCallNode {
                 } else {
                     // Secondly, we are looking into the node names in this flow
                     // Otherwises, we should looking into the node names in the whole engine
-                    let flow = self.get_flow().upgrade().expect("The flow must be instanced!");
+                    let flow = self.flow().expect("The flow must be instanced!");
 
                     if let Some(node) = flow.get_node_by_name(target_name)? {
                         Some(node)
@@ -192,7 +184,7 @@ impl LinkCallNode {
                 .upgrade()
                 .ok_or(EdgelinkError::InvalidOperation("The flow cannot be released".to_string()))?;
             if flow.is_subflow() {
-                return Err(EdgelinkError::InvalidData(
+                return Err(EdgelinkError::InvalidOperation(
                     "A `link call` cannot call a `link in` node inside a subflow".to_string(),
                 )
                 .into());
@@ -242,7 +234,7 @@ impl LinkCallNodeBehavior for LinkCallNode {
     /// Receive the returning message
     async fn return_msg(
         &self,
-        msg: Arc<RwLock<Msg>>,
+        msg: MsgHandle,
         stack_id: ElementId,
         _return_from_node_id: ElementId,
         _return_from_flow_id: ElementId,
@@ -250,7 +242,7 @@ impl LinkCallNodeBehavior for LinkCallNode {
     ) -> crate::Result<()> {
         let mut mut_state = self.mut_state.lock().await;
         if let Some(event) = mut_state.msg_events.remove(&stack_id) {
-            self.fan_out_one(&Envelope { msg, port: 0 }, cancel).await?;
+            self.fan_out_one(Envelope { msg, port: 0 }, cancel).await?;
             drop(event);
             Ok(())
         } else {

@@ -55,7 +55,7 @@ impl InjectNode {
         base_node: FlowNode,
         _config: &RedFlowNodeConfig,
     ) -> crate::Result<Box<dyn FlowNodeBehavior>> {
-        let json = handle_legacy_json(&_config.json);
+        let json = handle_legacy_json(&_config.rest);
         let mut inject_node_config = InjectNodeConfig::deserialize(&json)?;
 
         // fix the `crontab`
@@ -149,21 +149,16 @@ impl InjectNode {
         let mut msg_body: BTreeMap<String, Variant> = BTreeMap::new();
         for prop in self.config.props.iter() {
             let k = prop.p.to_string();
-            let v =
-                eval::evaluate_node_property(&prop.v, prop.vt, Some(self), self.get_flow().upgrade().as_ref(), None)
-                    .await?;
+            let v = eval::evaluate_node_property(&prop.v, prop.vt, Some(self), self.flow().as_ref(), None).await?;
             msg_body.insert(k, v);
         }
         msg_body.insert(wellknown::MSG_ID_PROPERTY.to_string(), Variant::String(Msg::generate_id().to_string()));
 
-        let envelope = Envelope { port: 0, msg: Msg::new_with_body(msg_body) };
+        let envelope = Envelope { port: 0, msg: MsgHandle::with_body(msg_body) };
 
-        {
-            let to_notify = envelope.msg.read().await;
-            self.notify_uow_completed(&to_notify, stop_token.clone()).await;
-        }
+        self.notify_uow_completed(envelope.msg.clone(), stop_token.clone()).await;
 
-        self.fan_out_one(&envelope, stop_token.clone()).await
+        self.fan_out_one(envelope, stop_token.clone()).await
     }
 }
 

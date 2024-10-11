@@ -1,5 +1,3 @@
-use thiserror::Error;
-
 pub mod runtime;
 pub mod text;
 pub mod utils;
@@ -21,7 +19,8 @@ pub trait Plugin {
     fn callback2(&self, i: i32) -> i32;
 }
 
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum EdgelinkError {
     #[error("Permission Denied")]
     PermissionDenied,
@@ -36,7 +35,7 @@ pub enum EdgelinkError {
     NotSupported(String),
 
     #[error("Invalid arguments: {0}")]
-    BadArguments(String),
+    BadArgument(&'static str),
 
     #[error("Task cancelled")]
     TaskCancelled,
@@ -44,14 +43,14 @@ pub enum EdgelinkError {
     #[error("{0}")]
     InvalidOperation(String),
 
-    #[error("{0}")]
-    InvalidData(String),
-
     #[error("Out of range")]
     OutOfRange,
 
     #[error("Invalid configuration")]
     Configuration,
+
+    #[error("Timed out")]
+    Timeout,
 
     #[error("IO error")]
     Io(#[from] std::io::Error),
@@ -63,3 +62,30 @@ pub enum EdgelinkError {
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 pub type Result<T, E = anyhow::Error> = anyhow::Result<T, E>;
+
+pub use anyhow::Context as ErrorContext;
+
+impl EdgelinkError {
+    pub fn invalid_operation(msg: &str) -> anyhow::Error {
+        EdgelinkError::InvalidOperation(msg.into()).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[ctor::ctor]
+    fn initialize_test_logger() {
+        let stderr = log4rs::append::console::ConsoleAppender::builder()
+            .target(log4rs::append::console::Target::Stdout)
+            .encoder(Box::new(log4rs::encode::pattern::PatternEncoder::new("[{h({l})}]\t{m}{n}")))
+            .build();
+
+        let config = log4rs::Config::builder()
+            .appender(log4rs::config::Appender::builder().build("stderr", Box::new(stderr)))
+            .build(log4rs::config::Root::builder().appender("stderr").build(log::LevelFilter::Warn))
+            .unwrap();
+
+        let _ = log4rs::init_config(config).unwrap();
+    }
+}

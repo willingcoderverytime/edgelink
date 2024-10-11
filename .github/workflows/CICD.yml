@@ -5,9 +5,29 @@ on:
     branches:
       - master
       - dev
+    paths:
+      - '.github/workflows/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'crates/**'
+      - 'node-plugins/**'
+      - '*.rs'
+      - '*.toml'
+      - '*.ini'
+      - '*.lock'
   pull_request:
     branches:
       - master
+    paths:
+      - '.github/workflows/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'crates/**'
+      - 'node-plugins/**'
+      - '*.rs'
+      - '*.toml'
+      - '*.ini'
+      - '*.lock'
 
 permissions:
   contents: read
@@ -63,9 +83,6 @@ jobs:
           target: ${{ matrix.target }}
           components: llvm-tools-preview
 
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-
       - name: Cache Rust dependencies
         uses: actions/cache@v4
         with:
@@ -78,13 +95,7 @@ jobs:
         run: cargo build --profile ci --workspace --target ${{ matrix.target }} --features full
 
       - name: Run Rust tests
-        run: cargo nextest run --workspace --no-fail-fast --features full --target ${{ matrix.target }}
-
-      - name: Run Python tests
-        env:
-          EDGELINK_BUILD_TARGET: ${{ matrix.target }}
-          EDGELINK_BUILD_PROFILE: ci
-        run: pytest ./tests -v
+        run: cargo test run --workspace --no-fail-fast --features full --target ${{ matrix.target }} --profile ci
 
   build-and-test-linux:
     name: Build and Test on Linux (x86-64)
@@ -112,9 +123,6 @@ jobs:
           target: ${{ matrix.target }}
           components: llvm-tools-preview
 
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-
       - name: Cache Rust dependencies
         uses: actions/cache@v4
         with:
@@ -125,9 +133,11 @@ jobs:
 
       - name: Build
         run: cargo build --profile ci --workspace --target ${{ matrix.target }} --features full
+        env:
+          PYTHON_SYS_EXECUTABLE: ${{ env.PYTHON_SYS_EXECUTABLE }}
 
       - name: Run Rust tests
-        run: cargo nextest run --workspace --no-fail-fast --features full --target ${{ matrix.target }}
+        run: cargo test run --workspace --no-fail-fast --features full --target ${{ matrix.target }} --profile ci
 
       - name: Run Python tests
         env:
@@ -135,8 +145,8 @@ jobs:
           EDGELINK_BUILD_PROFILE: ci
         run: pytest ./tests -v
 
-  build-arm-linux:
-    name: Build on ARM Linux
+  build-and-test-on-arm-linux:
+    name: Build and Test on ARM Linux
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -160,26 +170,53 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r ./tests/requirements.txt
+
+      - name: Install dependencies
+        run: sudo apt-get -y install qemu-user qemu-user-static
+
       - name: Install cross-compilation tools for ARM 64
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu libc-dev-arm64-cross
+          echo "EDGELINK_TOOLCHAIN_TRIPLE=aarch64-linux-gnu" >> $GITHUB_ENV
+          echo "EDGELINK_QEMU_CMD=qemu-aarch64-static" >> $GITHUB_ENV
 
       - name: Install cross-compilation tools for ARM 32 (gnueabihf)
         if: matrix.target == 'armv7-unknown-linux-gnueabihf'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-arm-linux-gnueabihf libc-dev-armhf-cross
+          echo "EDGELINK_TOOLCHAIN_TRIPLE=arm-linux-gnueabihf" >> $GITHUB_ENV
+          echo "EDGELINK_QEMU_CMD=qemu-arm-static" >> $GITHUB_ENV
 
       - name: Install cross-compilation tools for ARM 32 (gnueabi)
         if: matrix.target == 'armv7-unknown-linux-gnueabi'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-arm-linux-gnueabi libc-dev-armel-cross
+          echo "EDGELINK_TOOLCHAIN_TRIPLE=arm-linux-gnueabi" >> $GITHUB_ENV
+          echo "EDGELINK_QEMU_CMD=qemu-arm-static" >> $GITHUB_ENV
 
       - name: Build
-        run: cargo build --profile ci --workspace --target ${{ matrix.target }} --features full
+        run: cargo build --profile ci --workspace --target ${{ matrix.target }} --features full --exclude edgelink-pymod
+
+      - name: Build tests without running
+        run: cargo test --profile ci --target ${{ matrix.target }} --features full --exclude edgelink-pymod --no-run --message-format=json | tee ./target/${{ matrix.target }}/ci/cargo-build-test.json
+
+      - name: Run unit tests in QEMU ARM
+        run: python3 ./scripts/cross-unittest.py ${{ env.EDGELINK_QEMU_CMD }}  ${{ env.EDGELINK_TOOLCHAIN_TRIPLE }} ./target/${{ matrix.target }}/ci/cargo-build-test.json
+        env:
+          EDGELINK_TOOLCHAIN_TRIPLE: ${{ env.EDGELINK_TOOLCHAIN_TRIPLE }}
+          EDGELINK_QEMU_CMD: ${{ env.EDGELINK_QEMU_CMD }}
 
   fmt:
     name: Format checking
@@ -224,25 +261,3 @@ jobs:
             ${{ runner.os }}-cargo-
       - name: Clippy
         run: cargo clippy --all-features --tests --all
-
-  doctest:
-    name: Run doctests
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          target: x86_64-unknown-linux-gnu
-          components: clippy
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-      - name: Doctest
-        run: cargo test --doc --profile ci --workspace --features full

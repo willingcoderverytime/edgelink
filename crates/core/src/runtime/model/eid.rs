@@ -4,6 +4,7 @@ use std::ops::BitXor;
 use std::str::FromStr;
 
 use crate::utils;
+use crate::*;
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ElementId(u64);
@@ -36,6 +37,18 @@ impl FromStr for ElementId {
     }
 }
 
+impl From<u64> for ElementId {
+    fn from(value: u64) -> Self {
+        ElementId(value)
+    }
+}
+
+impl From<ElementId> for u64 {
+    fn from(val: ElementId) -> Self {
+        val.0
+    }
+}
+
 impl ElementId {
     pub fn new() -> Self {
         Self(utils::generate_uid())
@@ -63,8 +76,10 @@ impl ElementId {
     }
 
     pub fn combine(lhs: &ElementId, rhs: &ElementId) -> crate::Result<Self> {
-        if rhs.is_empty() || lhs.is_empty() {
-            Err(crate::EdgelinkError::BadArguments("The ids cannot be zero!".into()).into())
+        if rhs.is_empty() {
+            Err(crate::EdgelinkError::BadArgument("rhs").into())
+        } else if lhs.is_empty() {
+            Err(crate::EdgelinkError::BadArgument("lhs").into())
         } else {
             Ok(*lhs ^ *rhs)
         }

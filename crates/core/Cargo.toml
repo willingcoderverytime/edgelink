@@ -29,11 +29,12 @@ thiserror.workspace = true
 nom.workspace = true
 bumpalo.workspace = true
 regex.workspace = true
-topological-sort.workspace = true
 tokio-cron-scheduler.workspace = true
 chrono.workspace = true
 semver.workspace = true
 rquickjs = { optional = true, workspace = true }
+rquickjs-extra = { optional = true, workspace = true }
+#llrt_modules = { optional = true, workspace = true }
 rand.workspace = true
 base64.workspace = true
 # Serialization stuff
@@ -52,13 +53,17 @@ arrayvec = { workspace = true, features = ["std", "serde"] }
 
 [dev-dependencies]
 # Enable test-utilities in dev mode only. This is mostly for tests.
-tokio = { version = "1", features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util"] }
+log4rs.workspace = true
+ctor.workspace = true
 
 
 [features]
 default = ["core", "js", "net"]
 core = []
-js = ["rquickjs"]
+pymod = []
+#js = ["rquickjs", "rquickjs-extra", "llrt_modules"]
+js = ["rquickjs", "rquickjs-extra"]
 rqjs_bindgen = ["rquickjs/bindgen"]
 net = ["nodes_mqtt", "nodes_udp"]
 nodes_mqtt = []

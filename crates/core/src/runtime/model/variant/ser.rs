@@ -12,7 +12,13 @@ impl Serialize for Variant {
             Variant::Number(v) => v.serialize(serializer),
             Variant::String(v) => serializer.serialize_str(v),
             Variant::Bool(v) => serializer.serialize_bool(*v),
-            Variant::Bytes(v) => serializer.serialize_bytes(v),
+            Variant::Bytes(v) => {
+                let mut seq = serializer.serialize_seq(Some(v.len()))?;
+                for item in v {
+                    seq.serialize_element(item)?;
+                }
+                seq.end()
+            }
             Variant::Regexp(v) => serializer.serialize_str(v.as_str()),
             Variant::Date(v) => {
                 let ts = v.duration_since(UNIX_EPOCH).map_err(serde::ser::Error::custom)?;
@@ -31,38 +37,6 @@ impl Serialize for Variant {
                     map.serialize_entry(k, v)?;
                 }
                 map.end()
-            }
-        }
-    }
-}
-
-impl From<serde_json::Value> for Variant {
-    fn from(jv: serde_json::Value) -> Self {
-        match jv {
-            serde_json::Value::Null => Variant::Null,
-            serde_json::Value::Bool(boolean) => Variant::from(boolean),
-            serde_json::Value::Number(number) => Variant::Number(number),
-            serde_json::Value::String(string) => Variant::String(string.to_owned()),
-            serde_json::Value::Array(array) => Variant::Array(array.iter().map(Variant::from).collect()),
-            serde_json::Value::Object(object) => {
-                let new_map: VariantObjectMap = object.iter().map(|(k, v)| (k.to_owned(), Variant::from(v))).collect();
-                Variant::Object(new_map)
-            }
-        }
-    }
-}
-
-impl From<&serde_json::Value> for Variant {
-    fn from(jv: &serde_json::Value) -> Self {
-        match jv {
-            serde_json::Value::Null => Variant::Null,
-            serde_json::Value::Bool(boolean) => Variant::from(*boolean),
-            serde_json::Value::Number(number) => Variant::Number(number.clone()),
-            serde_json::Value::String(string) => Variant::String(string.clone()),
-            serde_json::Value::Array(array) => Variant::Array(array.iter().map(Variant::from).collect()),
-            serde_json::Value::Object(object) => {
-                let new_map: VariantObjectMap = object.iter().map(|(k, v)| (k.clone(), Variant::from(v))).collect();
-                Variant::Object(new_map)
             }
         }
     }

@@ -36,8 +36,8 @@ struct LinkOutNode {
 
 impl LinkOutNode {
     fn build(flow: &Flow, state: FlowNode, _config: &RedFlowNodeConfig) -> crate::Result<Box<dyn FlowNodeBehavior>> {
-        let link_out_config = LinkOutNodeConfig::deserialize(&_config.json)?;
-        let engine = flow.engine.upgrade().expect("The engine must be created!");
+        let link_out_config = LinkOutNodeConfig::deserialize(&_config.rest)?;
+        let engine = flow.engine().expect("The engine must be created!");
 
         let mut linked_nodes = Vec::new();
         if link_out_config.mode == LinkOutMode::Link {
@@ -59,12 +59,15 @@ impl LinkOutNode {
         Ok(Box::new(node))
     }
 
-    async fn uow(&self, msg: Arc<RwLock<Msg>>, cancel: CancellationToken) -> crate::Result<()> {
+    async fn uow(&self, msg: MsgHandle, cancel: CancellationToken) -> crate::Result<()> {
         match self.mode {
             LinkOutMode::Link => {
+                let mut is_msg_sent = false;
                 for link_node in self.linked_nodes.iter() {
                     if let Some(link_node) = link_node.upgrade() {
-                        link_node.inject_msg(msg.clone(), cancel.clone()).await?;
+                        let cloned_msg = if is_msg_sent { msg.deep_clone(true).await } else { msg.clone() };
+                        is_msg_sent = true;
+                        link_node.inject_msg(cloned_msg, cancel.clone()).await?;
                     } else {
                         let err_msg =
                             format!("The required `link in` was unavailable in `link out` node(id={})!", self.id());
@@ -74,7 +77,7 @@ impl LinkOutNode {
             }
             LinkOutMode::Return => {
                 let flow = self.get_node().flow.upgrade().expect("The flow cannot be released!");
-                let engine = flow.engine.upgrade().expect("The engine cannot be released");
+                let engine = flow.engine().expect("The engine cannot be released");
                 let stack_top = {
                     let mut msg_guard = msg.write().await;
                     msg_guard.pop_link_source()
@@ -93,14 +96,14 @@ impl LinkOutNode {
                             .into());
                         }
                     } else {
-                        return Err(EdgelinkError::InvalidData(format!(
+                        return Err(EdgelinkError::InvalidOperation(format!(
                             "Cannot found the `link call` node by id='{}'",
                             source_link.link_call_node_id
                         ))
                         .into());
                     }
                 } else {
-                    return Err(EdgelinkError::InvalidData(format!(
+                    return Err(EdgelinkError::InvalidOperation(format!(
                         "The `link call stack` is empty for msg: {:?}",
                         msg
                     ))

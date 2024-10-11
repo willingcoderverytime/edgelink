@@ -51,8 +51,8 @@ struct UdpOutNode {
 }
 
 impl UdpOutNode {
-    fn build(_flow: &Flow, state: FlowNode, _config: &RedFlowNodeConfig) -> crate::Result<Box<dyn FlowNodeBehavior>> {
-        let udp_config = UdpOutNodeConfig::deserialize(&_config.json)?;
+    fn build(_flow: &Flow, state: FlowNode, config: &RedFlowNodeConfig) -> crate::Result<Box<dyn FlowNodeBehavior>> {
+        let udp_config = UdpOutNodeConfig::deserialize(&config.rest)?;
 
         let node = UdpOutNode { base: state, config: udp_config };
         Ok(Box::new(node))
@@ -85,7 +85,7 @@ struct UdpOutNodeConfig {
 }
 
 impl UdpOutNode {
-    async fn uow(&self, msg: Arc<RwLock<Msg>>, socket: &UdpSocket) -> crate::Result<()> {
+    async fn uow(&self, msg: MsgHandle, socket: &UdpSocket) -> crate::Result<()> {
         let msg_guard = msg.read().await;
         if let Some(payload) = msg_guard.get("payload") {
             let remote_addr = std::net::SocketAddr::new(
