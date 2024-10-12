@@ -1,7 +1,7 @@
 
 
 
-/// [handle_error] 通用的msg处理方式实现error throw 的代码优雅程度。
+/// [handle_option] 通用的msg处理方式实现error throw 的代码优雅程度。
 ///
 /// # Example
 ///
