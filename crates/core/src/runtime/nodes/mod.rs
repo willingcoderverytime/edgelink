@@ -20,6 +20,8 @@ use crate::utils::constants::FLOW_STR;
 pub(crate) mod common_nodes;
 mod function_nodes;
 
+mod storage_nodes;
+
 #[cfg(feature = "net")]
 mod network_nodes;
 

@@ -5,6 +5,7 @@ use serde_json::Value as JsonValue;
 
 pub mod deser;
 pub mod helpers;
+mod npdeser;
 
 #[derive(serde::Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct RedPortConfig {

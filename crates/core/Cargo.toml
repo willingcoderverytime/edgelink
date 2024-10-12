@@ -50,6 +50,8 @@ smallvec.workspace = true
 smallstr.workspace = true
 inventory.workspace = true
 arrayvec = { workspace = true, features = ["std", "serde"] }
+validator = { version = "0.18.1", features = ["derive"] }
+
 
 [dev-dependencies]
 # Enable test-utilities in dev mode only. This is mostly for tests.
