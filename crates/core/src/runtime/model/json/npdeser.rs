@@ -11,14 +11,14 @@
 //! if ((node.appendNewline) && (!Buffer.isBuffer(data)) && aflg) { data += os.EOL; }
 //! ```
 //!
-use std::borrow::Cow;
-use std::str;
+#![allow(dead_code)]
+use serde::de::{Error, Unexpected, Visitor};
 use serde::{de, Deserializer};
-use serde::de::{Error, Unexpected};
+use std::str;
 
 pub fn deser_bool_in_if_condition<'de, D>(deserializer: D) -> Result<bool, D::Error>
-    where
-        D: Deserializer<'de>,
+where
+    D: Deserializer<'de>,
 {
     struct BoolVisitor;
 
@@ -27,130 +27,149 @@ pub fn deser_bool_in_if_condition<'de, D>(deserializer: D) -> Result<bool, D::Er
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
             formatter.write_str("a bool, convert failed")
         }
-        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E> where E: Error {
+        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
             match str::from_utf8(v) {
                 Ok(s) => {
-                    if s =="" {
-                        return  Ok(false);
-                    }else if s=="0" {
-                        return Ok(false);
-                    }else if s.contains("false")||s.contains("False")||s.contains("FALSE"){
-                        return Ok(false);
+                    if let Some(value) = Self::convert_to_bool(s) {
+                        return value;
                     }
                     Ok(true)
-                },
+                }
                 Err(_) => Err(Error::invalid_value(Unexpected::Bool(false), &self)),
             }
         }
-        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> where E: Error {
-            if v==0 {
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            if v == 0 {
                 return Ok(false);
             }
             Ok(true)
         }
-        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> where E: Error {
-            if v==0 {
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            if v == 0 {
                 return Ok(false);
             }
             Ok(true)
         }
-        fn visit_u32<E>(self, v: u32) -> Result<Self::Value, E> where E: Error {
-            if v==0 {
+        fn visit_u32<E>(self, v: u32) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            if v == 0 {
                 return Ok(false);
             }
             Ok(true)
         }
-        fn visit_i32<E>(self, v: i32) -> Result<Self::Value, E> where E: Error {
-            if v==0 {
-                return Ok(false);
-            }
-            Ok(true)
-        }
-
-        fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E> where E: Error {
-            if v==0.0 {
-                return Ok(false);
-            }
-            Ok(true)
-        }
-
-        fn visit_f32<E>(self, v: f32) -> Result<Self::Value, E> where E: Error {
-            if v==0.0 {
+        fn visit_i32<E>(self, v: i32) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            if v == 0 {
                 return Ok(false);
             }
             Ok(true)
         }
 
-        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> where E: Error {
-            if v =="" {
-                return  Ok(false);
-            }else if v=="0" {
-                return Ok(false);
-            }else if v.contains("false")||v.contains("False")||v.contains("FALSE"){
+        fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            if v == 0.0 {
                 return Ok(false);
             }
             Ok(true)
+        }
+
+        fn visit_f32<E>(self, v: f32) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            if v == 0.0 {
+                return Ok(false);
+            }
+            Ok(true)
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            if let Some(value) = Self::convert_to_bool(v) {
+                return value;
+            }
+            Ok(true)
+        }
+    }
+
+    impl BoolVisitor {
+        fn convert_to_bool<E>(v: &str) -> Option<Result<<BoolVisitor as Visitor>::Value, E>> where E: Error {
+             if v.is_empty()|| v == "0" || v.contains("false") || v.contains("False") || v.contains("FALSE") {
+                return Some(Ok(false));
+            }
+            None
         }
     }
 
     deserializer.deserialize_any(BoolVisitor)
 }
 
-
 #[cfg(test)]
 mod tests {
-    use std::net::IpAddr;
+    use super::*;
     use serde::Deserialize;
     use serde_json::json;
-    use super::*;
+    use std::net::IpAddr;
 
     #[derive(Deserialize, Debug)]
     struct TestNodeConfig {
         #[serde(deserialize_with = "crate::runtime::model::json::npdeser::deser_bool_in_if_condition")]
-        test: bool
+        test: bool,
     }
-    
+
     #[test]
     fn test_deser_bool_in_if_condition() {
-        let value_str =  json!({"test":"xxx"});
+        let value_str = json!({"test":"xxx"});
         let result = TestNodeConfig::deserialize(value_str).unwrap();
         assert!(result.test);
 
-        let value_str =  json!({"test":"true"});
+        let value_str = json!({"test":"true"});
         let result = TestNodeConfig::deserialize(value_str).unwrap();
         assert!(result.test);
 
-
-        let value_str =  json!({"test":"false"});
+        let value_str = json!({"test":"false"});
         let result = TestNodeConfig::deserialize(value_str).unwrap();
         assert!(!result.test);
 
-
-        let value_str =  json!({"test":"False"});
+        let value_str = json!({"test":"False"});
         let result = TestNodeConfig::deserialize(value_str).unwrap();
         assert!(!result.test);
 
-        let value_str =  json!({"test":"0"});
+        let value_str = json!({"test":"0"});
         let result = TestNodeConfig::deserialize(value_str).unwrap();
         assert!(!result.test);
 
-        let value_str =  json!({"test":1.0});
+        let value_str = json!({"test":1.0});
         let result = TestNodeConfig::deserialize(value_str).unwrap();
         assert!(result.test);
 
-        let value_str =  json!({"test":0.0});
+        let value_str = json!({"test":0.0});
         let result = TestNodeConfig::deserialize(value_str).unwrap();
         assert!(!result.test);
 
-
-        let value_str =  json!({"test":0});
+        let value_str = json!({"test":0});
         let result = TestNodeConfig::deserialize(value_str).unwrap();
         assert!(!result.test);
 
-
-        let value_str =  json!({"test":1});
+        let value_str = json!({"test":1});
         let result = TestNodeConfig::deserialize(value_str).unwrap();
         assert!(result.test);
-
     }
 }
