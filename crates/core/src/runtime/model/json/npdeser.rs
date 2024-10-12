@@ -48,7 +48,24 @@ pub fn deser_bool_in_if_condition<'de, D>(deserializer: D) -> Result<bool, D::Er
             }
             Ok(true)
         }
-
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> where E: Error {
+            if v==0 {
+                return Ok(false);
+            }
+            Ok(true)
+        }
+        fn visit_u32<E>(self, v: u32) -> Result<Self::Value, E> where E: Error {
+            if v==0 {
+                return Ok(false);
+            }
+            Ok(true)
+        }
+        fn visit_i32<E>(self, v: i32) -> Result<Self::Value, E> where E: Error {
+            if v==0 {
+                return Ok(false);
+            }
+            Ok(true)
+        }
 
         fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E> where E: Error {
             if v==0.0 {
