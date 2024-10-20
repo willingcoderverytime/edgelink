@@ -126,7 +126,6 @@ mod tests {
     use super::*;
     use serde::Deserialize;
     use serde_json::json;
-    use std::net::IpAddr;
 
     #[derive(Deserialize, Debug)]
     struct TestNodeConfig {
