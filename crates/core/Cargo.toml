@@ -10,6 +10,7 @@ name = "edgelink_core"
 
 [dependencies]
 anyhow.workspace = true
+jsonschema="0.23.0"
 tokio = { workspace = true, features = [
     "rt",
     "rt-multi-thread",
@@ -49,7 +50,9 @@ itertools.workspace = true
 smallvec.workspace = true
 smallstr.workspace = true
 inventory.workspace = true
+serde_yaml.workspace = true
 arrayvec = { workspace = true, features = ["std", "serde"] }
+
 
 [dev-dependencies]
 # Enable test-utilities in dev mode only. This is mostly for tests.

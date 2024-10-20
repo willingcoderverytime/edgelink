@@ -19,6 +19,8 @@ use crate::*;
 pub(crate) mod common_nodes;
 mod function_nodes;
 
+mod parsers_nodes;
+
 #[cfg(feature = "net")]
 mod network_nodes;
 

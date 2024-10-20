@@ -110,8 +110,11 @@ where
     }
 
     impl BoolVisitor {
-        fn convert_to_bool<E>(v: &str) -> Option<Result<<BoolVisitor as Visitor>::Value, E>> where E: Error {
-             if v.is_empty()|| v == "0" || v.contains("false") || v.contains("False") || v.contains("FALSE") {
+        fn convert_to_bool<E>(v: &str) -> Option<Result<<BoolVisitor as Visitor>::Value, E>>
+        where
+            E: Error,
+        {
+            if v.is_empty() || v == "0" || v.contains("false") || v.contains("False") || v.contains("FALSE") {
                 return Some(Ok(false));
             }
             None
